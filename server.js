@@ -1,8 +1,10 @@
 const WebSocket = require('ws');
 
-// Usa a porta que o provedor gratuito fornecer, ou a porta 3000 localmente
 const PORT = process.env.PORT || 3000;
 const wss = new WebSocket.Server({ port: PORT });
+
+// Defina a senha oficial da guilda aqui no servidor
+const SENHA_MESTRE = "1031"; 
 
 let conectados = [];
 
@@ -13,11 +15,16 @@ wss.on('connection', (ws) => {
         try {
             const data = JSON.parse(message);
 
-            // Se um líder enviar a lista ou o alvo, retransmite para todos
+            // Valida se a senha enviada pelo bot confere com a senha do servidor
+            if (data.pass !== SENHA_MESTRE) {
+                console.log('Tentativa de conexão negada: Senha incorreta.');
+                return; // Ignora o pacote se a senha estiver errada
+            }
+
+            // Se a senha estiver certa, processa a sincronização
             if (data.type === 'SYNC_MEMBERS') {
                 conectados = data.members || [];
                 
-                // Espalha a atualização para todos os clientes conectados
                 wss.clients.forEach((client) => {
                     if (client.readyState === WebSocket.OPEN) {
                         client.send(JSON.stringify({ type: 'UPDATE_MEMBERS', members: conectados }));
