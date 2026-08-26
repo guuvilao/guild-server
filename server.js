@@ -1,44 +1,47 @@
-const WebSocket = require('ws');
+const http = require('http');
 
 const PORT = process.env.PORT || 3000;
-const wss = new WebSocket.Server({ port: PORT });
-
-// Defina a senha oficial da guilda aqui no servidor
 const SENHA_MESTRE = "1031"; 
 
-let conectados = [];
+let conectadosMap = new Map();
 
-wss.on('connection', (ws) => {
-    console.log('Novo membro conectado!');
+const server = http.createServer((req, res) => {
+    // Trata URLs com parâmetros de forma flexível
+    const baseUrl = `http://${req.headers.host}`;
+    const urlObj = new URL(req.url, baseUrl);
+    
+    if (urlObj.pathname === '/sync' || urlObj.pathname === '/') {
+        const pass = urlObj.searchParams.get('pass');
+        const name = urlObj.searchParams.get('name');
 
-    ws.on('message', (message) => {
-        try {
-            const data = JSON.parse(message);
-
-            // Valida se a senha enviada pelo bot confere com a senha do servidor
-            if (data.pass !== SENHA_MESTRE) {
-                console.log('Tentativa de conexão negada: Senha incorreta.');
-                return; // Ignora o pacote se a senha estiver errada
-            }
-
-            // Se a senha estiver certa, processa a sincronização
-            if (data.type === 'SYNC_MEMBERS') {
-                conectados = data.members || [];
-                
-                wss.clients.forEach((client) => {
-                    if (client.readyState === WebSocket.OPEN) {
-                        client.send(JSON.stringify({ type: 'UPDATE_MEMBERS', members: conectados }));
-                    }
-                });
-            }
-        } catch (e) {
-            console.log('Erro ao processar mensagem:', e);
+        // Valida a senha (se vier vazia ou errada)
+        if (pass !== SENHA_MESTRE) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Senha incorreta' }));
+            return;
         }
-    });
 
-    ws.on('close', () => {
-        console.log('Membro desconectado.');
-    });
+        // Se enviou o nome do personagem, registra na lista
+        if (name) {
+            conectadosMap.set(name, Date.now());
+        }
+
+        // Remove inativos há mais de 30 segundos
+        const agora = Date.now();
+        for (let [jogador, timestamp] of conectadosMap.entries()) {
+            if (agora - timestamp > 30000) {
+                conectadosMap.delete(jogador);
+            }
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ members: Array.from(conectadosMap.keys()) }));
+    } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Rota nao encontrada');
+    }
 });
 
-console.log(`Servidor rodando na porta ${PORT}`);
+server.listen(PORT, () => {
+    console.log(`Servidor HTTP rodando na porta ${PORT}`);
+});
