@@ -23,6 +23,7 @@ const chavesValidas = {
         maxSessoes: 1,
         permiteLeader: true
     },
+
     "CLIENTE-001-XYZ": {
         ativo: true,
         dono: "Joao da War",
@@ -30,6 +31,7 @@ const chavesValidas = {
         maxSessoes: 1,
         permiteLeader: true
     },
+
     "DREAMNAV-777": {
         ativo: true,
         dono: "Membro da Quest",
@@ -46,7 +48,16 @@ const sessoes = new Map();
 const conectadosMap = new Map();
 
 // room -> Map(rank -> slot)
-// slot = { token, name, rank, claimedAt, lastHeartbeat, alive, target }
+// slot = {
+//   token,
+//   name,
+//   rank,
+//   claimedAt,
+//   lastHeartbeat,
+//   alive,
+//   target,
+//   targetId
+// }
 const leaderRooms = new Map();
 
 // ip -> rate limit auth
@@ -79,7 +90,10 @@ function authPermitido(req) {
     const agora = Date.now();
     const atual = authRateMap.get(ip);
 
-    if (!atual || agora - atual.startedAt >= AUTH_WINDOW_MS) {
+    if (
+        !atual ||
+        agora - atual.startedAt >= AUTH_WINDOW_MS
+    ) {
         authRateMap.set(ip, {
             count: 1,
             startedAt: agora
@@ -88,7 +102,9 @@ function authPermitido(req) {
         return true;
     }
 
-    if (atual.count >= AUTH_MAX_ATTEMPTS) {
+    if (
+        atual.count >= AUTH_MAX_ATTEMPTS
+    ) {
         return false;
     }
 
@@ -97,31 +113,51 @@ function authPermitido(req) {
     return true;
 }
 
-function normalizarTexto(value, max = 50, allowEmpty = false) {
-    if (typeof value !== 'string') {
+function normalizarTexto(
+    value,
+    max = 50,
+    allowEmpty = false
+) {
+    if (
+        typeof value !== 'string'
+    ) {
         return '';
     }
 
-    const texto = value.trim();
+    const texto =
+        value.trim();
 
     if (!texto) {
-        return allowEmpty ? '' : '';
+        return allowEmpty
+            ? ''
+            : '';
     }
 
-    if (texto.length > max) {
+    if (
+        texto.length > max
+    ) {
         return '';
     }
 
     // Bloqueia caracteres de controle
-    if (/[\x00-\x1F\x7F]/.test(texto)) {
+    if (
+        /[\x00-\x1F\x7F]/.test(texto)
+    ) {
         return '';
     }
 
     return texto;
 }
 
-function normalizarNome(value, max = 50) {
-    return normalizarTexto(value, max, false);
+function normalizarNome(
+    value,
+    max = 50
+) {
+    return normalizarTexto(
+        value,
+        max,
+        false
+    );
 }
 
 function salaValida(value) {
@@ -132,13 +168,19 @@ function salaValida(value) {
 }
 
 function vocacaoValida(value) {
-    return ['EK', 'ED', 'MS', 'RP'].includes(value);
+    return [
+        'EK',
+        'ED',
+        'MS',
+        'RP'
+    ].includes(value);
 }
 
 function parseBoolean(value) {
-    const raw = String(value || '')
-        .trim()
-        .toLowerCase();
+    const raw =
+        String(value || '')
+            .trim()
+            .toLowerCase();
 
     return (
         raw === '1' ||
@@ -149,7 +191,8 @@ function parseBoolean(value) {
 }
 
 function parseLeaderRank(value) {
-    const rank = Number(value);
+    const rank =
+        Number(value);
 
     if (
         !Number.isInteger(rank) ||
@@ -162,20 +205,27 @@ function parseLeaderRank(value) {
     return rank;
 }
 
-function personagemPermitido(registro, nome) {
+function personagemPermitido(
+    registro,
+    nome
+) {
     if (
-        !Array.isArray(registro.personagens) ||
+        !Array.isArray(
+            registro.personagens
+        ) ||
         registro.personagens.length === 0
     ) {
         return true;
     }
 
-    const alvo = nome.toLowerCase();
+    const alvo =
+        nome.toLowerCase();
 
-    return registro.personagens.some((personagem) =>
-        String(personagem)
-            .trim()
-            .toLowerCase() === alvo
+    return registro.personagens.some(
+        (personagem) =>
+            String(personagem)
+                .trim()
+                .toLowerCase() === alvo
     );
 }
 
@@ -185,21 +235,42 @@ function gerarToken() {
         .toString('hex');
 }
 
-function getLeaderMap(room, create = false) {
-    let map = leaderRooms.get(room);
+function getLeaderMap(
+    room,
+    create = false
+) {
+    let map =
+        leaderRooms.get(room);
 
-    if (!map && create) {
+    if (
+        !map &&
+        create
+    ) {
         map = new Map();
-        leaderRooms.set(room, map);
+
+        leaderRooms.set(
+            room,
+            map
+        );
     }
 
     return map || null;
 }
 
-function findLeaderSlotByToken(token) {
-    for (const [room, map] of leaderRooms.entries()) {
-        for (const [rank, slot] of map.entries()) {
-            if (slot.token === token) {
+function findLeaderSlotByToken(
+    token
+) {
+    for (
+        const [room, map]
+        of leaderRooms.entries()
+    ) {
+        for (
+            const [rank, slot]
+            of map.entries()
+        ) {
+            if (
+                slot.token === token
+            ) {
                 return {
                     room,
                     rank,
@@ -217,10 +288,15 @@ function releaseLeaderToken(
     exceptRoom = null,
     exceptRank = 0
 ) {
-    for (const [room, map] of leaderRooms.entries()) {
+    for (
+        const [room, map]
+        of leaderRooms.entries()
+    ) {
         for (
             const [rank, slot]
-            of Array.from(map.entries())
+            of Array.from(
+                map.entries()
+            )
         ) {
             if (
                 slot.token === token &&
@@ -233,8 +309,12 @@ function releaseLeaderToken(
             }
         }
 
-        if (map.size === 0) {
-            leaderRooms.delete(room);
+        if (
+            map.size === 0
+        ) {
+            leaderRooms.delete(
+                room
+            );
         }
     }
 }
@@ -246,28 +326,43 @@ function apagarSessao(token) {
 }
 
 function validarSessao(token) {
-    if (!token || typeof token !== 'string') {
+    if (
+        !token ||
+        typeof token !== 'string'
+    ) {
         return null;
     }
 
-    const sessao = sessoes.get(token);
+    const sessao =
+        sessoes.get(token);
 
     if (!sessao) {
         return null;
     }
 
-    const agora = Date.now();
+    const agora =
+        Date.now();
 
-    if (agora >= sessao.expiresAt) {
+    if (
+        agora >=
+        sessao.expiresAt
+    ) {
         apagarSessao(token);
+
         return null;
     }
 
     const registro =
-        chavesValidas[sessao.key];
+        chavesValidas[
+            sessao.key
+        ];
 
-    if (!registro || !registro.ativo) {
+    if (
+        !registro ||
+        !registro.ativo
+    ) {
         apagarSessao(token);
+
         return null;
     }
 
@@ -284,11 +379,15 @@ function prepararNovaSessao(
         const [token, sessao]
         of sessoes.entries()
     ) {
-        if (sessao.key !== key) {
+        if (
+            sessao.key !== key
+        ) {
             continue;
         }
 
-        if (!validarSessao(token)) {
+        if (
+            !validarSessao(token)
+        ) {
             continue;
         }
 
@@ -305,7 +404,8 @@ function prepararNovaSessao(
     );
 
     while (
-        existentes.length >= maxSessoes
+        existentes.length >=
+        maxSessoes
     ) {
         const antiga =
             existentes.shift();
@@ -325,7 +425,9 @@ function cleanupLeaderRooms(
     ) {
         for (
             const [rank, slot]
-            of Array.from(map.entries())
+            of Array.from(
+                map.entries()
+            )
         ) {
             const sessao =
                 validarSessao(
@@ -337,51 +439,72 @@ function cleanupLeaderRooms(
                     slot.lastHeartbeat >
                 PLAYER_TIMEOUT_MS;
 
-            if (!sessao || expired) {
+            if (
+                !sessao ||
+                expired
+            ) {
                 map.delete(rank);
             }
         }
 
-        if (map.size === 0) {
-            leaderRooms.delete(room);
+        if (
+            map.size === 0
+        ) {
+            leaderRooms.delete(
+                room
+            );
         }
     }
 }
 
 function limparExpirados() {
-    const agora = Date.now();
+    const agora =
+        Date.now();
 
+    // Remove sessoes invalidas
     for (
         const token
-        of Array.from(sessoes.keys())
+        of Array.from(
+            sessoes.keys()
+        )
     ) {
         validarSessao(token);
     }
 
+    // Remove jogadores offline
     for (
         const [token, data]
         of conectadosMap.entries()
     ) {
         if (
-            agora - data.timestamp >
+            agora -
+                data.timestamp >
                 PLAYER_TIMEOUT_MS ||
             !validarSessao(token)
         ) {
-            conectadosMap.delete(token);
+            conectadosMap.delete(
+                token
+            );
         }
     }
 
-    cleanupLeaderRooms(agora);
+    cleanupLeaderRooms(
+        agora
+    );
 
+    // Limpa anti-spam antigo
     for (
         const [ip, data]
         of authRateMap.entries()
     ) {
         if (
-            agora - data.startedAt >
+            agora -
+                data.startedAt >
             AUTH_WINDOW_MS * 2
         ) {
-            authRateMap.delete(ip);
+            authRateMap.delete(
+                ip
+            );
         }
     }
 }
@@ -392,7 +515,7 @@ setInterval(
 ).unref();
 
 // ==========================================
-// CONTROLE DE LEADER
+// CONTROLE DOS LEADERS
 // ==========================================
 
 function processLeaderRequest({
@@ -404,35 +527,45 @@ function processLeaderRequest({
     requestedRank,
     alive,
     target,
+    targetId,
     agora
 }) {
     const previous =
-        findLeaderSlotByToken(token);
+        findLeaderSlotByToken(
+            token
+        );
 
     // ==========================================
     // DESLIGOU LEADER
     // ==========================================
 
-    if (!requestedActive) {
-        releaseLeaderToken(token);
+    if (
+        !requestedActive
+    ) {
+        releaseLeaderToken(
+            token
+        );
 
         return {
             accepted: true,
             active: false,
             rank: 0,
-            msg: 'Combo Leader OFF.'
+            msg:
+                'Combo Leader OFF.'
         };
     }
 
     // ==========================================
-    // LICENCA NAO PERMITE LEADER
+    // KEY SEM PERMISSAO LEADER
     // ==========================================
 
     if (
         !registro ||
         registro.permiteLeader !== true
     ) {
-        releaseLeaderToken(token);
+        releaseLeaderToken(
+            token
+        );
 
         return {
             accepted: false,
@@ -453,11 +586,17 @@ function processLeaderRequest({
     ) {
         return {
             accepted: false,
-            active: Boolean(previous),
+
+            active:
+                Boolean(
+                    previous
+                ),
+
             rank:
                 previous
                     ? previous.rank
                     : 0,
+
             msg:
                 'Prioridade de Leader invalida.'
         };
@@ -475,7 +614,7 @@ function processLeaderRequest({
         );
 
     // ==========================================
-    // SLOT OCUPADO POR OUTRA PESSOA
+    // SLOT OCUPADO
     // ==========================================
 
     if (
@@ -498,7 +637,11 @@ function processLeaderRequest({
         ) {
             return {
                 accepted: false,
-                active: Boolean(previous),
+
+                active:
+                    Boolean(
+                        previous
+                    ),
 
                 rank:
                     previous
@@ -519,7 +662,7 @@ function processLeaderRequest({
     }
 
     // ==========================================
-    // RESERVA O SLOT
+    // RESERVA SLOT
     // ==========================================
 
     map.set(
@@ -543,15 +686,25 @@ function processLeaderRequest({
                 agora,
 
             alive:
-                Boolean(alive),
+                Boolean(
+                    alive
+                ),
 
             target:
-                target || ''
+                target || '',
+
+            targetId:
+                Number.isInteger(
+                    targetId
+                ) &&
+                targetId > 0
+                    ? targetId
+                    : 0
         }
     );
 
-    // Libera qualquer outro slot antigo
-    // que esse mesmo token possuia.
+    // Libera outro slot antigo
+    // pertencente ao mesmo token
     releaseLeaderToken(
         token,
         room,
@@ -561,7 +714,9 @@ function processLeaderRequest({
     return {
         accepted: true,
         active: true,
-        rank: requestedRank,
+
+        rank:
+            requestedRank,
 
         msg:
             `Voce e o Leader ${requestedRank}.`
@@ -573,6 +728,7 @@ function updateOwnedLeaderHeartbeat(
     room,
     alive,
     target,
+    targetId,
     agora
 ) {
     const owned =
@@ -595,6 +751,14 @@ function updateOwnedLeaderHeartbeat(
 
     owned.slot.target =
         target || '';
+
+    owned.slot.targetId =
+        Number.isInteger(
+            targetId
+        ) &&
+        targetId > 0
+            ? targetId
+            : 0;
 }
 
 function buildLeadersResponse(
@@ -623,10 +787,7 @@ function buildLeadersResponse(
                 ? map.get(rank)
                 : null;
 
-        // ==========================================
         // SLOT LIVRE
-        // ==========================================
-
         if (!slot) {
             result.push({
                 rank,
@@ -635,15 +796,12 @@ function buildLeadersResponse(
                 alive: false,
                 online: false,
                 operational: false,
-                target: ''
+                target: '',
+                targetId: 0
             });
 
             continue;
         }
-
-        // ==========================================
-        // LEADER ONLINE
-        // ==========================================
 
         const online =
             agora -
@@ -657,7 +815,9 @@ function buildLeadersResponse(
 
         result.push({
             rank,
-            occupied: true,
+
+            occupied:
+                true,
 
             name:
                 slot.name,
@@ -667,10 +827,16 @@ function buildLeadersResponse(
             online,
 
             operational:
-                online && alive,
+                online &&
+                alive,
 
             target:
-                slot.target || ''
+                slot.target || '',
+
+            targetId:
+                Number(
+                    slot.targetId
+                ) || 0
         });
     }
 
@@ -713,10 +879,7 @@ const server =
     }
 
     // ==========================================
-    // HEALTH CHECK
-    //
-    // /
-    // /health
+    // HEALTH
     // ==========================================
 
     if (
@@ -732,7 +895,7 @@ const server =
                 ok: true,
 
                 service:
-                    'guild-server-v4',
+                    'guild-server-v5',
 
                 online:
                     conectadosMap.size,
@@ -750,8 +913,6 @@ const server =
 
     // ==========================================
     // AUTH
-    //
-    // /auth?key=XXX&name=Personagem
     // ==========================================
 
     if (
@@ -773,7 +934,6 @@ const server =
             return;
         }
 
-        // Anti-spam
         if (
             !authPermitido(req)
         ) {
@@ -805,10 +965,6 @@ const server =
         const registro =
             chavesValidas[key];
 
-        // ==========================================
-        // DADOS AUSENTES
-        // ==========================================
-
         if (
             !key ||
             !name
@@ -826,10 +982,6 @@ const server =
             return;
         }
 
-        // ==========================================
-        // KEY INVALIDA
-        // ==========================================
-
         if (
             !registro ||
             !registro.ativo
@@ -846,10 +998,6 @@ const server =
 
             return;
         }
-
-        // ==========================================
-        // PERSONAGEM NAO PERMITIDO
-        // ==========================================
 
         if (
             !personagemPermitido(
@@ -870,10 +1018,6 @@ const server =
             return;
         }
 
-        // ==========================================
-        // LIMITE DE SESSOES
-        // ==========================================
-
         const maxSessoes =
             Math.max(
                 1,
@@ -886,10 +1030,6 @@ const server =
             key,
             maxSessoes
         );
-
-        // ==========================================
-        // CRIA TOKEN
-        // ==========================================
 
         const agora =
             Date.now();
@@ -964,10 +1104,6 @@ const server =
             return;
         }
 
-        // ==========================================
-        // DADOS RECEBIDOS
-        // ==========================================
-
         const token =
             urlObj.searchParams.get(
                 'token'
@@ -1016,6 +1152,21 @@ const server =
                 50,
                 true
             );
+
+        const targetIdRaw =
+            Number(
+                urlObj.searchParams.get(
+                    'targetId'
+                ) || 0
+            );
+
+        const targetId =
+            Number.isInteger(
+                targetIdRaw
+            ) &&
+            targetIdRaw > 0
+                ? targetIdRaw
+                : 0;
 
         const alive =
             parseBoolean(
@@ -1123,7 +1274,7 @@ const server =
             SESSION_TTL_MS;
 
         // ==========================================
-        // ATUALIZA PLAYER ONLINE
+        // ATUALIZA PLAYER
         // ==========================================
 
         conectadosMap.set(
@@ -1140,6 +1291,8 @@ const server =
 
                 target,
 
+                targetId,
+
                 alive,
 
                 timestamp:
@@ -1148,7 +1301,7 @@ const server =
         );
 
         // ==========================================
-        // PROCESSA LEADER
+        // LEADER
         // ==========================================
 
         let myLeader;
@@ -1173,16 +1326,12 @@ const server =
 
                     target,
 
+                    targetId,
+
                     agora
                 });
 
         } else {
-            // Membro normal
-            // ou Leader que desligou o botao.
-            //
-            // Libera imediatamente
-            // qualquer vaga de Leader.
-
             myLeader =
                 processLeaderRequest({
                     token,
@@ -1200,24 +1349,23 @@ const server =
 
                     target,
 
+                    targetId,
+
                     agora
                 });
         }
-
-        // ==========================================
-        // HEARTBEAT DO LEADER
-        // ==========================================
 
         updateOwnedLeaderHeartbeat(
             token,
             room,
             alive,
             target,
+            targetId,
             agora
         );
 
         // ==========================================
-        // JOGADORES DO MESMO CANAL
+        // PLAYERS DA SALA
         // ==========================================
 
         const playersByName =
@@ -1265,6 +1413,11 @@ const server =
                         target:
                             data.target || '',
 
+                        targetId:
+                            Number(
+                                data.targetId
+                            ) || 0,
+
                         alive:
                             Boolean(
                                 data.alive
@@ -1273,10 +1426,6 @@ const server =
                 );
             }
         }
-
-        // ==========================================
-        // ORDENA JOGADORES
-        // ==========================================
 
         const players =
             Array
@@ -1295,10 +1444,6 @@ const server =
                         )
                 );
 
-        // ==========================================
-        // RETORNA L1 / L2 / L3
-        // ==========================================
-
         const leaders =
             buildLeadersResponse(
                 room,
@@ -1306,7 +1451,7 @@ const server =
             );
 
         // ==========================================
-        // RESPOSTA FINAL
+        // RESPOSTA
         // ==========================================
 
         responderJson(
@@ -1335,7 +1480,7 @@ const server =
     }
 
     // ==========================================
-    // ROTA NAO ENCONTRADA
+    // 404
     // ==========================================
 
     responderJson(
@@ -1350,14 +1495,14 @@ const server =
 });
 
 // ==========================================
-// INICIA SERVIDOR
+// START
 // ==========================================
 
 server.listen(
     PORT,
     () => {
         console.log(
-            `[Guild Server V4] Servidor HTTP rodando na porta ${PORT}`
+            `[Guild Server V5] Servidor HTTP rodando na porta ${PORT}`
         );
     }
 );
