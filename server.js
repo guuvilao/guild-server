@@ -3,20 +3,11 @@ const crypto = require('crypto');
 
 const PORT = Number(process.env.PORT) || 3000;
 
-// ==========================================
-// CONFIGURACOES DO SERVIDOR
-// ==========================================
-const PLAYER_TIMEOUT_MS = 30 * 1000;          // jogador some da sala apos 30s sem sync
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // token valido por 12 horas
-const AUTH_WINDOW_MS = 60 * 1000;             // janela do anti-spam do /auth
-const AUTH_MAX_ATTEMPTS = 10;                 // maximo de tentativas por IP/minuto
+const PLAYER_TIMEOUT_MS = 30 * 1000;
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const AUTH_WINDOW_MS = 60 * 1000;
+const AUTH_MAX_ATTEMPTS = 10;
 
-// ==========================================
-// BANCO DE CHAVES
-// personagens: [] = aceita qualquer personagem com essa key
-// personagens: ["Nome"] = restringe a key aos nomes informados
-// maxSessoes: 1 = uma sessao simultanea por key
-// ==========================================
 const chavesValidas = {
     "GUSTAVO-TESTE-123": {
         ativo: true,
@@ -41,7 +32,7 @@ const chavesValidas = {
 // token -> { key, name, dono, createdAt, lastSeen, expiresAt }
 const sessoes = new Map();
 
-// token -> { name, room, timestamp }
+// token -> { name, room, voc, needsMana, target, timestamp }
 const conectadosMap = new Map();
 
 // ip -> { count, startedAt }
@@ -61,7 +52,9 @@ function getClientIp(req) {
     const forwarded = req.headers['x-forwarded-for'];
 
     if (forwarded) {
-        return String(forwarded).split(',')[0].trim();
+        return String(forwarded)
+            .split(',')[0]
+            .trim();
     }
 
     return req.socket.remoteAddress || 'unknown';
@@ -90,37 +83,36 @@ function authPermitido(req) {
     return true;
 }
 
-function normalizarNome(value) {
+function normalizarNome(value, max = 50) {
     if (typeof value !== 'string') {
         return '';
     }
 
-    const nome = value.trim();
+    const texto = value.trim();
 
-    if (!nome || nome.length > 50) {
+    if (!texto || texto.length > max) {
         return '';
     }
 
-    // Bloqueia caracteres de controle
-    // Permite espacos, acentos, numeros etc.
-    if (/[\x00-\x1F\x7F]/.test(nome)) {
+    if (/[^\P{C}\t]/u.test(texto)) {
         return '';
     }
 
-    return nome;
+    return texto;
 }
 
 function salaValida(value) {
-    if (typeof value !== 'string') {
-        return false;
-    }
+    return (
+        typeof value === 'string' &&
+        /^[A-Za-z0-9_-]{1,32}$/.test(value)
+    );
+}
 
-    return /^[A-Za-z0-9_-]{1,32}$/.test(value);
+function vocacaoValida(value) {
+    return ['EK', 'ED', 'MS', 'RP'].includes(value);
 }
 
 function personagemPermitido(registro, nome) {
-
-    // Lista vazia = qualquer personagem
     if (
         !Array.isArray(registro.personagens) ||
         registro.personagens.length === 0
@@ -131,9 +123,11 @@ function personagemPermitido(registro, nome) {
     const alvo = nome.toLowerCase();
 
     return registro.personagens.some((personagem) => {
-        return String(personagem)
-            .trim()
-            .toLowerCase() === alvo;
+        return (
+            String(personagem)
+                .trim()
+                .toLowerCase() === alvo
+        );
     });
 }
 
@@ -149,7 +143,6 @@ function apagarSessao(token) {
 }
 
 function validarSessao(token) {
-
     if (!token || typeof token !== 'string') {
         return null;
     }
@@ -162,13 +155,11 @@ function validarSessao(token) {
 
     const agora = Date.now();
 
-    // Token expirou
     if (agora >= sessao.expiresAt) {
         apagarSessao(token);
         return null;
     }
 
-    // Verifica se a key ainda existe e esta ativa
     const registro = chavesValidas[sessao.key];
 
     if (!registro || !registro.ativo) {
@@ -180,11 +171,9 @@ function validarSessao(token) {
 }
 
 function prepararNovaSessao(key, maxSessoes) {
-
     const existentes = [];
 
     for (const [token, sessao] of sessoes.entries()) {
-
         if (sessao.key !== key) {
             continue;
         }
@@ -199,15 +188,11 @@ function prepararNovaSessao(key, maxSessoes) {
         });
     }
 
-    // Ordena da sessao mais antiga para a mais nova
     existentes.sort((a, b) => {
         return a.sessao.createdAt - b.sessao.createdAt;
     });
 
-    // Se exceder o numero permitido,
-    // remove a sessao mais antiga
     while (existentes.length >= maxSessoes) {
-
         const antiga = existentes.shift();
 
         apagarSessao(antiga.token);
@@ -215,17 +200,15 @@ function prepararNovaSessao(key, maxSessoes) {
 }
 
 function limparExpirados() {
-
     const agora = Date.now();
 
-    // Remove sessoes expiradas
+    // Limpa sessoes expiradas
     for (const token of Array.from(sessoes.keys())) {
         validarSessao(token);
     }
 
-    // Remove jogadores offline
+    // Limpa jogadores offline
     for (const [token, data] of conectadosMap.entries()) {
-
         if (
             agora - data.timestamp > PLAYER_TIMEOUT_MS ||
             !validarSessao(token)
@@ -234,9 +217,8 @@ function limparExpirados() {
         }
     }
 
-    // Limpa registros antigos do anti-spam
+    // Limpa IPs antigos do anti-spam
     for (const [ip, data] of authRateMap.entries()) {
-
         if (
             agora - data.startedAt >
             AUTH_WINDOW_MS * 2
@@ -246,7 +228,6 @@ function limparExpirados() {
     }
 }
 
-// Executa limpeza automatica a cada 10 segundos
 setInterval(
     limparExpirados,
     10 * 1000
@@ -257,11 +238,9 @@ setInterval(
 // ==========================================
 
 const server = http.createServer((req, res) => {
-
     let urlObj;
 
     try {
-
         const host =
             req.headers.host ||
             `localhost:${PORT}`;
@@ -271,8 +250,7 @@ const server = http.createServer((req, res) => {
             `http://${host}`
         );
 
-    } catch (erro) {
-
+    } catch {
         responderJson(res, 400, {
             ok: false,
             msg: 'Requisicao invalida.'
@@ -283,7 +261,6 @@ const server = http.createServer((req, res) => {
 
     // ==========================================
     // HEALTH CHECK
-    //
     // /
     // /health
     // ==========================================
@@ -292,11 +269,11 @@ const server = http.createServer((req, res) => {
         urlObj.pathname === '/' ||
         urlObj.pathname === '/health'
     ) {
-
         responderJson(res, 200, {
             ok: true,
             service: 'guild-server',
-            online: conectadosMap.size
+            online: conectadosMap.size,
+            sessions: sessoes.size
         });
 
         return;
@@ -305,18 +282,12 @@ const server = http.createServer((req, res) => {
     // ==========================================
     // AUTH
     //
-    // VALIDA PRODUCT KEY
-    // E GERA TOKEN TEMPORARIO
-    //
     // Exemplo:
-    //
     // /auth?key=GUSTAVO-TESTE-123&name=Gustavo
     // ==========================================
 
     if (urlObj.pathname === '/auth') {
-
         if (req.method !== 'GET') {
-
             responderJson(res, 405, {
                 auth: false,
                 msg: 'Metodo nao permitido.'
@@ -325,9 +296,7 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        // Anti-spam por IP
         if (!authPermitido(req)) {
-
             responderJson(res, 429, {
                 auth: false,
                 msg: 'Muitas tentativas. Aguarde um minuto.'
@@ -347,9 +316,7 @@ const server = http.createServer((req, res) => {
         const registro =
             chavesValidas[key];
 
-        // Key ou personagem nao enviado
         if (!key || !name) {
-
             responderJson(res, 400, {
                 auth: false,
                 msg: 'Key ou personagem nao informado.'
@@ -358,9 +325,7 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        // Key inexistente ou desativada
         if (!registro || !registro.ativo) {
-
             responderJson(res, 401, {
                 auth: false,
                 msg: 'Key invalida ou expirada.'
@@ -369,14 +334,12 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        // Verifica personagem autorizado
         if (
             !personagemPermitido(
                 registro,
                 name
             )
         ) {
-
             responderJson(res, 403, {
                 auth: false,
                 msg: 'Personagem nao autorizado para esta key.'
@@ -385,7 +348,6 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        // Numero maximo de sessoes permitidas
         const maxSessoes =
             Math.max(
                 1,
@@ -403,37 +365,21 @@ const server = http.createServer((req, res) => {
         const token =
             gerarToken();
 
-        // Cria a sessao
         sessoes.set(token, {
-
             key,
-
             name,
-
-            dono:
-                registro.dono || '',
-
-            createdAt:
-                agora,
-
-            lastSeen:
-                agora,
-
+            dono: registro.dono || '',
+            createdAt: agora,
+            lastSeen: agora,
             expiresAt:
                 agora + SESSION_TTL_MS
         });
 
         responderJson(res, 200, {
-
             auth: true,
-
-            msg:
-                'Licenca valida! Bem vindo.',
-
+            msg: 'Licenca valida! Bem vindo.',
             token,
-
-            expiresIn:
-                SESSION_TTL_MS
+            expiresIn: SESSION_TTL_MS
         });
 
         return;
@@ -442,17 +388,12 @@ const server = http.createServer((req, res) => {
     // ==========================================
     // SYNC
     //
-    // AGORA EXIGE TOKEN VALIDO
-    //
     // Exemplo:
-    //
     // /sync?token=TOKEN&room=1031&name=Gustavo
     // ==========================================
 
     if (urlObj.pathname === '/sync') {
-
         if (req.method !== 'GET') {
-
             responderJson(res, 405, {
                 auth: false,
                 msg: 'Metodo nao permitido.'
@@ -465,19 +406,49 @@ const server = http.createServer((req, res) => {
             urlObj.searchParams.get('token') || '';
 
         const room =
-            urlObj.searchParams.get('room') || '';
+            urlObj.searchParams.get('room') ||
+            urlObj.searchParams.get('pass') ||
+            '';
 
         const name =
             normalizarNome(
                 urlObj.searchParams.get('name')
             );
 
-        // Verifica o token
+        const vocRaw =
+            String(
+                urlObj.searchParams.get('voc') || ''
+            ).toUpperCase();
+
+        const voc =
+            vocacaoValida(vocRaw)
+                ? vocRaw
+                : '';
+
+        const needsManaRaw =
+            String(
+                urlObj.searchParams.get('needsMana') || ''
+            ).toLowerCase();
+
+        const needsMana =
+            needsManaRaw === '1' ||
+            needsManaRaw === 'true' ||
+            needsManaRaw === 'yes';
+
+        const target =
+            normalizarNome(
+                urlObj.searchParams.get('target') || '',
+                50
+            );
+
+        // ==========================================
+        // VALIDA TOKEN
+        // ==========================================
+
         const sessao =
             validarSessao(token);
 
         if (!sessao) {
-
             responderJson(res, 401, {
                 auth: false,
                 msg: 'Sessao invalida ou expirada.'
@@ -486,14 +457,15 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        // O personagem precisa ser o mesmo
-        // usado na autenticacao
+        // ==========================================
+        // CONFERE PERSONAGEM
+        // ==========================================
+
         if (
             !name ||
             name.toLowerCase() !==
             sessao.name.toLowerCase()
         ) {
-
             responderJson(res, 403, {
                 auth: false,
                 msg: 'Personagem nao corresponde a sessao.'
@@ -502,9 +474,11 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        // Verifica se a sala e valida
-        if (!salaValida(room)) {
+        // ==========================================
+        // CONFERE SALA
+        // ==========================================
 
+        if (!salaValida(room)) {
             responderJson(res, 400, {
                 auth: false,
                 msg: 'Canal invalido.'
@@ -516,43 +490,43 @@ const server = http.createServer((req, res) => {
         const agora =
             Date.now();
 
-        // Atualiza a sessao
+        // Renova sessao enquanto estiver usando
         sessao.lastSeen =
             agora;
 
-        // Renova validade enquanto
-        // o jogador estiver usando o bot
         sessao.expiresAt =
             agora + SESSION_TTL_MS;
 
-        // Atualiza jogador online
+        // ==========================================
+        // ATUALIZA JOGADOR ONLINE
+        // ==========================================
+
         conectadosMap.set(token, {
-
-            name:
-                sessao.name,
-
+            name: sessao.name,
             room,
-
-            timestamp:
-                agora
+            voc,
+            needsMana,
+            target,
+            timestamp: agora
         });
 
-        const membrosSet =
-            new Set();
+        // ==========================================
+        // LISTA DE JOGADORES DA SALA
+        // ==========================================
 
-        // Procura os jogadores da mesma sala
+        const playersByName =
+            new Map();
+
         for (
             const [outroToken, data]
             of conectadosMap.entries()
         ) {
-
             // Remove jogador offline
             if (
                 agora - data.timestamp >
-                PLAYER_TIMEOUT_MS ||
+                    PLAYER_TIMEOUT_MS ||
                 !validarSessao(outroToken)
             ) {
-
                 conectadosMap.delete(
                     outroToken
                 );
@@ -560,21 +534,41 @@ const server = http.createServer((req, res) => {
                 continue;
             }
 
-            // Mesma sala
+            // Mesmo canal
             if (data.room === room) {
+                playersByName.set(
+                    data.name.toLowerCase(),
+                    {
+                        name:
+                            data.name,
 
-                membrosSet.add(
-                    data.name
+                        voc:
+                            data.voc || '',
+
+                        needsMana:
+                            Boolean(
+                                data.needsMana
+                            ),
+
+                        target:
+                            data.target || ''
+                    }
                 );
             }
         }
 
-        // Converte Set para Array
-        const membrosDaSala =
-            Array.from(membrosSet)
+        // ==========================================
+        // ORDENA POR NOME
+        // ==========================================
+
+        const players =
+            Array
+                .from(
+                    playersByName.values()
+                )
                 .sort((a, b) =>
-                    a.localeCompare(
-                        b,
+                    a.name.localeCompare(
+                        b.name,
                         'pt-BR',
                         {
                             sensitivity: 'base'
@@ -582,14 +576,20 @@ const server = http.createServer((req, res) => {
                     )
                 );
 
+        // ==========================================
+        // RESPOSTA
+        // ==========================================
+
         responderJson(res, 200, {
-
             auth: true,
-
             room,
 
             members:
-                membrosDaSala
+                players.map(
+                    (p) => p.name
+                ),
+
+            players
         });
 
         return;
@@ -610,9 +610,7 @@ const server = http.createServer((req, res) => {
 // ==========================================
 
 server.listen(PORT, () => {
-
     console.log(
         `[Guild Server] Servidor HTTP rodando na porta ${PORT}`
     );
-
 });
