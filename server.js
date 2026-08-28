@@ -4,38 +4,52 @@ const crypto = require('crypto');
 const PORT = Number(process.env.PORT) || 3000;
 
 const PLAYER_TIMEOUT_MS = 30 * 1000;
+const LEADER_ACTIVE_TIMEOUT_MS = 5 * 1000;
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const AUTH_WINDOW_MS = 60 * 1000;
 const AUTH_MAX_ATTEMPTS = 10;
 
+// ==========================================
+// PRODUCT KEYS
+// permiteLeader: true = esta key pode usar a versao Leader.
+// Use false para uma licenca vendida somente como Membro.
+// personagens: [] = aceita qualquer personagem.
+// ==========================================
 const chavesValidas = {
     "GUSTAVO-TESTE-123": {
         ativo: true,
         dono: "Voce",
         personagens: [],
-        maxSessoes: 1
+        maxSessoes: 1,
+        permiteLeader: true
     },
     "CLIENTE-001-XYZ": {
         ativo: true,
         dono: "Joao da War",
         personagens: [],
-        maxSessoes: 1
+        maxSessoes: 1,
+        permiteLeader: true
     },
     "DREAMNAV-777": {
         ativo: true,
         dono: "Membro da Quest",
         personagens: [],
-        maxSessoes: 1
+        maxSessoes: 1,
+        permiteLeader: true
     }
 };
 
-// token -> { key, name, dono, createdAt, lastSeen, expiresAt }
+// token -> sessao
 const sessoes = new Map();
 
-// token -> { name, room, voc, needsMana, target, timestamp }
+// token -> estado online do jogador
 const conectadosMap = new Map();
 
-// ip -> { count, startedAt }
+// room -> Map(rank -> slot)
+// slot = { token, name, rank, claimedAt, lastHeartbeat, alive, target }
+const leaderRooms = new Map();
+
+// ip -> rate limit auth
 const authRateMap = new Map();
 
 function responderJson(res, statusCode, payload) {
@@ -83,22 +97,31 @@ function authPermitido(req) {
     return true;
 }
 
-function normalizarNome(value, max = 50) {
+function normalizarTexto(value, max = 50, allowEmpty = false) {
     if (typeof value !== 'string') {
         return '';
     }
 
     const texto = value.trim();
 
-    if (!texto || texto.length > max) {
+    if (!texto) {
+        return allowEmpty ? '' : '';
+    }
+
+    if (texto.length > max) {
         return '';
     }
 
-    if (/[^\P{C}\t]/u.test(texto)) {
+    // Bloqueia caracteres de controle
+    if (/[\x00-\x1F\x7F]/.test(texto)) {
         return '';
     }
 
     return texto;
+}
+
+function normalizarNome(value, max = 50) {
+    return normalizarTexto(value, max, false);
 }
 
 function salaValida(value) {
@@ -112,6 +135,33 @@ function vocacaoValida(value) {
     return ['EK', 'ED', 'MS', 'RP'].includes(value);
 }
 
+function parseBoolean(value) {
+    const raw = String(value || '')
+        .trim()
+        .toLowerCase();
+
+    return (
+        raw === '1' ||
+        raw === 'true' ||
+        raw === 'yes' ||
+        raw === 'on'
+    );
+}
+
+function parseLeaderRank(value) {
+    const rank = Number(value);
+
+    if (
+        !Number.isInteger(rank) ||
+        rank < 1 ||
+        rank > 3
+    ) {
+        return 0;
+    }
+
+    return rank;
+}
+
 function personagemPermitido(registro, nome) {
     if (
         !Array.isArray(registro.personagens) ||
@@ -122,13 +172,11 @@ function personagemPermitido(registro, nome) {
 
     const alvo = nome.toLowerCase();
 
-    return registro.personagens.some((personagem) => {
-        return (
-            String(personagem)
-                .trim()
-                .toLowerCase() === alvo
-        );
-    });
+    return registro.personagens.some((personagem) =>
+        String(personagem)
+            .trim()
+            .toLowerCase() === alvo
+    );
 }
 
 function gerarToken() {
@@ -137,9 +185,64 @@ function gerarToken() {
         .toString('hex');
 }
 
+function getLeaderMap(room, create = false) {
+    let map = leaderRooms.get(room);
+
+    if (!map && create) {
+        map = new Map();
+        leaderRooms.set(room, map);
+    }
+
+    return map || null;
+}
+
+function findLeaderSlotByToken(token) {
+    for (const [room, map] of leaderRooms.entries()) {
+        for (const [rank, slot] of map.entries()) {
+            if (slot.token === token) {
+                return {
+                    room,
+                    rank,
+                    slot
+                };
+            }
+        }
+    }
+
+    return null;
+}
+
+function releaseLeaderToken(
+    token,
+    exceptRoom = null,
+    exceptRank = 0
+) {
+    for (const [room, map] of leaderRooms.entries()) {
+        for (
+            const [rank, slot]
+            of Array.from(map.entries())
+        ) {
+            if (
+                slot.token === token &&
+                !(
+                    room === exceptRoom &&
+                    rank === exceptRank
+                )
+            ) {
+                map.delete(rank);
+            }
+        }
+
+        if (map.size === 0) {
+            leaderRooms.delete(room);
+        }
+    }
+}
+
 function apagarSessao(token) {
     sessoes.delete(token);
     conectadosMap.delete(token);
+    releaseLeaderToken(token);
 }
 
 function validarSessao(token) {
@@ -160,7 +263,8 @@ function validarSessao(token) {
         return null;
     }
 
-    const registro = chavesValidas[sessao.key];
+    const registro =
+        chavesValidas[sessao.key];
 
     if (!registro || !registro.ativo) {
         apagarSessao(token);
@@ -170,10 +274,16 @@ function validarSessao(token) {
     return sessao;
 }
 
-function prepararNovaSessao(key, maxSessoes) {
+function prepararNovaSessao(
+    key,
+    maxSessoes
+) {
     const existentes = [];
 
-    for (const [token, sessao] of sessoes.entries()) {
+    for (
+        const [token, sessao]
+        of sessoes.entries()
+    ) {
         if (sessao.key !== key) {
             continue;
         }
@@ -188,37 +298,85 @@ function prepararNovaSessao(key, maxSessoes) {
         });
     }
 
-    existentes.sort((a, b) => {
-        return a.sessao.createdAt - b.sessao.createdAt;
-    });
+    existentes.sort(
+        (a, b) =>
+            a.sessao.createdAt -
+            b.sessao.createdAt
+    );
 
-    while (existentes.length >= maxSessoes) {
-        const antiga = existentes.shift();
+    while (
+        existentes.length >= maxSessoes
+    ) {
+        const antiga =
+            existentes.shift();
 
-        apagarSessao(antiga.token);
+        apagarSessao(
+            antiga.token
+        );
+    }
+}
+
+function cleanupLeaderRooms(
+    agora = Date.now()
+) {
+    for (
+        const [room, map]
+        of leaderRooms.entries()
+    ) {
+        for (
+            const [rank, slot]
+            of Array.from(map.entries())
+        ) {
+            const sessao =
+                validarSessao(
+                    slot.token
+                );
+
+            const expired =
+                agora -
+                    slot.lastHeartbeat >
+                PLAYER_TIMEOUT_MS;
+
+            if (!sessao || expired) {
+                map.delete(rank);
+            }
+        }
+
+        if (map.size === 0) {
+            leaderRooms.delete(room);
+        }
     }
 }
 
 function limparExpirados() {
     const agora = Date.now();
 
-    // Limpa sessoes expiradas
-    for (const token of Array.from(sessoes.keys())) {
+    for (
+        const token
+        of Array.from(sessoes.keys())
+    ) {
         validarSessao(token);
     }
 
-    // Limpa jogadores offline
-    for (const [token, data] of conectadosMap.entries()) {
+    for (
+        const [token, data]
+        of conectadosMap.entries()
+    ) {
         if (
-            agora - data.timestamp > PLAYER_TIMEOUT_MS ||
+            agora - data.timestamp >
+                PLAYER_TIMEOUT_MS ||
             !validarSessao(token)
         ) {
             conectadosMap.delete(token);
         }
     }
 
-    // Limpa IPs antigos do anti-spam
-    for (const [ip, data] of authRateMap.entries()) {
+    cleanupLeaderRooms(agora);
+
+    for (
+        const [ip, data]
+        of authRateMap.entries()
+    ) {
         if (
             agora - data.startedAt >
             AUTH_WINDOW_MS * 2
@@ -234,10 +392,299 @@ setInterval(
 ).unref();
 
 // ==========================================
+// CONTROLE DE LEADER
+// ==========================================
+
+function processLeaderRequest({
+    token,
+    sessao,
+    registro,
+    room,
+    requestedActive,
+    requestedRank,
+    alive,
+    target,
+    agora
+}) {
+    const previous =
+        findLeaderSlotByToken(token);
+
+    // ==========================================
+    // DESLIGOU LEADER
+    // ==========================================
+
+    if (!requestedActive) {
+        releaseLeaderToken(token);
+
+        return {
+            accepted: true,
+            active: false,
+            rank: 0,
+            msg: 'Combo Leader OFF.'
+        };
+    }
+
+    // ==========================================
+    // LICENCA NAO PERMITE LEADER
+    // ==========================================
+
+    if (
+        !registro ||
+        registro.permiteLeader !== true
+    ) {
+        releaseLeaderToken(token);
+
+        return {
+            accepted: false,
+            active: false,
+            rank: 0,
+            msg:
+                'Sua licenca nao possui acesso ao Combo Leader.'
+        };
+    }
+
+    // ==========================================
+    // RANK INVALIDO
+    // ==========================================
+
+    if (
+        requestedRank < 1 ||
+        requestedRank > 3
+    ) {
+        return {
+            accepted: false,
+            active: Boolean(previous),
+            rank:
+                previous
+                    ? previous.rank
+                    : 0,
+            msg:
+                'Prioridade de Leader invalida.'
+        };
+    }
+
+    const map =
+        getLeaderMap(
+            room,
+            true
+        );
+
+    const occupied =
+        map.get(
+            requestedRank
+        );
+
+    // ==========================================
+    // SLOT OCUPADO POR OUTRA PESSOA
+    // ==========================================
+
+    if (
+        occupied &&
+        occupied.token !== token
+    ) {
+        const occupiedSession =
+            validarSessao(
+                occupied.token
+            );
+
+        const slotExpired =
+            agora -
+                occupied.lastHeartbeat >
+            PLAYER_TIMEOUT_MS;
+
+        if (
+            occupiedSession &&
+            !slotExpired
+        ) {
+            return {
+                accepted: false,
+                active: Boolean(previous),
+
+                rank:
+                    previous
+                        ? previous.rank
+                        : 0,
+
+                msg:
+                    `Leader ${requestedRank} ja esta ocupado por ${occupied.name}.`,
+
+                occupiedBy:
+                    occupied.name
+            };
+        }
+
+        map.delete(
+            requestedRank
+        );
+    }
+
+    // ==========================================
+    // RESERVA O SLOT
+    // ==========================================
+
+    map.set(
+        requestedRank,
+        {
+            token,
+
+            name:
+                sessao.name,
+
+            rank:
+                requestedRank,
+
+            claimedAt:
+                occupied &&
+                occupied.token === token
+                    ? occupied.claimedAt
+                    : agora,
+
+            lastHeartbeat:
+                agora,
+
+            alive:
+                Boolean(alive),
+
+            target:
+                target || ''
+        }
+    );
+
+    // Libera qualquer outro slot antigo
+    // que esse mesmo token possuia.
+    releaseLeaderToken(
+        token,
+        room,
+        requestedRank
+    );
+
+    return {
+        accepted: true,
+        active: true,
+        rank: requestedRank,
+
+        msg:
+            `Voce e o Leader ${requestedRank}.`
+    };
+}
+
+function updateOwnedLeaderHeartbeat(
+    token,
+    room,
+    alive,
+    target,
+    agora
+) {
+    const owned =
+        findLeaderSlotByToken(
+            token
+        );
+
+    if (
+        !owned ||
+        owned.room !== room
+    ) {
+        return;
+    }
+
+    owned.slot.lastHeartbeat =
+        agora;
+
+    owned.slot.alive =
+        Boolean(alive);
+
+    owned.slot.target =
+        target || '';
+}
+
+function buildLeadersResponse(
+    room,
+    agora = Date.now()
+) {
+    cleanupLeaderRooms(
+        agora
+    );
+
+    const map =
+        getLeaderMap(
+            room,
+            false
+        );
+
+    const result = [];
+
+    for (
+        let rank = 1;
+        rank <= 3;
+        rank += 1
+    ) {
+        const slot =
+            map
+                ? map.get(rank)
+                : null;
+
+        // ==========================================
+        // SLOT LIVRE
+        // ==========================================
+
+        if (!slot) {
+            result.push({
+                rank,
+                occupied: false,
+                name: '',
+                alive: false,
+                online: false,
+                operational: false,
+                target: ''
+            });
+
+            continue;
+        }
+
+        // ==========================================
+        // LEADER ONLINE
+        // ==========================================
+
+        const online =
+            agora -
+                slot.lastHeartbeat <=
+            LEADER_ACTIVE_TIMEOUT_MS;
+
+        const alive =
+            Boolean(
+                slot.alive
+            );
+
+        result.push({
+            rank,
+            occupied: true,
+
+            name:
+                slot.name,
+
+            alive,
+
+            online,
+
+            operational:
+                online && alive,
+
+            target:
+                slot.target || ''
+        });
+    }
+
+    return result;
+}
+
+// ==========================================
 // SERVIDOR HTTP
 // ==========================================
 
-const server = http.createServer((req, res) => {
+const server =
+    http.createServer(
+        (req, res) => {
+
     let urlObj;
 
     try {
@@ -245,22 +692,29 @@ const server = http.createServer((req, res) => {
             req.headers.host ||
             `localhost:${PORT}`;
 
-        urlObj = new URL(
-            req.url,
-            `http://${host}`
-        );
+        urlObj =
+            new URL(
+                req.url,
+                `http://${host}`
+            );
 
     } catch {
-        responderJson(res, 400, {
-            ok: false,
-            msg: 'Requisicao invalida.'
-        });
+        responderJson(
+            res,
+            400,
+            {
+                ok: false,
+                msg:
+                    'Requisicao invalida.'
+            }
+        );
 
         return;
     }
 
     // ==========================================
     // HEALTH CHECK
+    //
     // /
     // /health
     // ==========================================
@@ -269,12 +723,27 @@ const server = http.createServer((req, res) => {
         urlObj.pathname === '/' ||
         urlObj.pathname === '/health'
     ) {
-        responderJson(res, 200, {
-            ok: true,
-            service: 'guild-server',
-            online: conectadosMap.size,
-            sessions: sessoes.size
-        });
+        cleanupLeaderRooms();
+
+        responderJson(
+            res,
+            200,
+            {
+                ok: true,
+
+                service:
+                    'guild-server-v4',
+
+                online:
+                    conectadosMap.size,
+
+                sessions:
+                    sessoes.size,
+
+                leaderRooms:
+                    leaderRooms.size
+            }
+        );
 
         return;
     }
@@ -282,57 +751,105 @@ const server = http.createServer((req, res) => {
     // ==========================================
     // AUTH
     //
-    // Exemplo:
-    // /auth?key=GUSTAVO-TESTE-123&name=Gustavo
+    // /auth?key=XXX&name=Personagem
     // ==========================================
 
-    if (urlObj.pathname === '/auth') {
-        if (req.method !== 'GET') {
-            responderJson(res, 405, {
-                auth: false,
-                msg: 'Metodo nao permitido.'
-            });
+    if (
+        urlObj.pathname === '/auth'
+    ) {
+        if (
+            req.method !== 'GET'
+        ) {
+            responderJson(
+                res,
+                405,
+                {
+                    auth: false,
+                    msg:
+                        'Metodo nao permitido.'
+                }
+            );
 
             return;
         }
 
-        if (!authPermitido(req)) {
-            responderJson(res, 429, {
-                auth: false,
-                msg: 'Muitas tentativas. Aguarde um minuto.'
-            });
+        // Anti-spam
+        if (
+            !authPermitido(req)
+        ) {
+            responderJson(
+                res,
+                429,
+                {
+                    auth: false,
+                    msg:
+                        'Muitas tentativas. Aguarde um minuto.'
+                }
+            );
 
             return;
         }
 
         const key =
-            urlObj.searchParams.get('key') || '';
+            urlObj.searchParams.get(
+                'key'
+            ) || '';
 
         const name =
             normalizarNome(
-                urlObj.searchParams.get('name')
+                urlObj.searchParams.get(
+                    'name'
+                )
             );
 
         const registro =
             chavesValidas[key];
 
-        if (!key || !name) {
-            responderJson(res, 400, {
-                auth: false,
-                msg: 'Key ou personagem nao informado.'
-            });
+        // ==========================================
+        // DADOS AUSENTES
+        // ==========================================
+
+        if (
+            !key ||
+            !name
+        ) {
+            responderJson(
+                res,
+                400,
+                {
+                    auth: false,
+                    msg:
+                        'Key ou personagem nao informado.'
+                }
+            );
 
             return;
         }
 
-        if (!registro || !registro.ativo) {
-            responderJson(res, 401, {
-                auth: false,
-                msg: 'Key invalida ou expirada.'
-            });
+        // ==========================================
+        // KEY INVALIDA
+        // ==========================================
+
+        if (
+            !registro ||
+            !registro.ativo
+        ) {
+            responderJson(
+                res,
+                401,
+                {
+                    auth: false,
+                    msg:
+                        'Key invalida ou expirada.'
+                }
+            );
 
             return;
         }
+
+        // ==========================================
+        // PERSONAGEM NAO PERMITIDO
+        // ==========================================
 
         if (
             !personagemPermitido(
@@ -340,18 +857,29 @@ const server = http.createServer((req, res) => {
                 name
             )
         ) {
-            responderJson(res, 403, {
-                auth: false,
-                msg: 'Personagem nao autorizado para esta key.'
-            });
+            responderJson(
+                res,
+                403,
+                {
+                    auth: false,
+                    msg:
+                        'Personagem nao autorizado para esta key.'
+                }
+            );
 
             return;
         }
 
+        // ==========================================
+        // LIMITE DE SESSOES
+        // ==========================================
+
         const maxSessoes =
             Math.max(
                 1,
-                Number(registro.maxSessoes) || 1
+                Number(
+                    registro.maxSessoes
+                ) || 1
             );
 
         prepararNovaSessao(
@@ -359,65 +887,113 @@ const server = http.createServer((req, res) => {
             maxSessoes
         );
 
+        // ==========================================
+        // CRIA TOKEN
+        // ==========================================
+
         const agora =
             Date.now();
 
         const token =
             gerarToken();
 
-        sessoes.set(token, {
-            key,
-            name,
-            dono: registro.dono || '',
-            createdAt: agora,
-            lastSeen: agora,
-            expiresAt:
-                agora + SESSION_TTL_MS
-        });
-
-        responderJson(res, 200, {
-            auth: true,
-            msg: 'Licenca valida! Bem vindo.',
+        sessoes.set(
             token,
-            expiresIn: SESSION_TTL_MS
-        });
+            {
+                key,
+
+                name,
+
+                dono:
+                    registro.dono || '',
+
+                createdAt:
+                    agora,
+
+                lastSeen:
+                    agora,
+
+                expiresAt:
+                    agora +
+                    SESSION_TTL_MS
+            }
+        );
+
+        responderJson(
+            res,
+            200,
+            {
+                auth: true,
+
+                msg:
+                    'Licenca valida! Bem vindo.',
+
+                token,
+
+                expiresIn:
+                    SESSION_TTL_MS,
+
+                leaderAllowed:
+                    registro.permiteLeader === true
+            }
+        );
 
         return;
     }
 
     // ==========================================
     // SYNC
-    //
-    // Exemplo:
-    // /sync?token=TOKEN&room=1031&name=Gustavo
     // ==========================================
 
-    if (urlObj.pathname === '/sync') {
-        if (req.method !== 'GET') {
-            responderJson(res, 405, {
-                auth: false,
-                msg: 'Metodo nao permitido.'
-            });
+    if (
+        urlObj.pathname === '/sync'
+    ) {
+        if (
+            req.method !== 'GET'
+        ) {
+            responderJson(
+                res,
+                405,
+                {
+                    auth: false,
+                    msg:
+                        'Metodo nao permitido.'
+                }
+            );
 
             return;
         }
 
+        // ==========================================
+        // DADOS RECEBIDOS
+        // ==========================================
+
         const token =
-            urlObj.searchParams.get('token') || '';
+            urlObj.searchParams.get(
+                'token'
+            ) || '';
 
         const room =
-            urlObj.searchParams.get('room') ||
-            urlObj.searchParams.get('pass') ||
+            urlObj.searchParams.get(
+                'room'
+            ) ||
+            urlObj.searchParams.get(
+                'pass'
+            ) ||
             '';
 
         const name =
             normalizarNome(
-                urlObj.searchParams.get('name')
+                urlObj.searchParams.get(
+                    'name'
+                )
             );
 
         const vocRaw =
             String(
-                urlObj.searchParams.get('voc') || ''
+                urlObj.searchParams.get(
+                    'voc'
+                ) || ''
             ).toUpperCase();
 
         const voc =
@@ -425,34 +1001,62 @@ const server = http.createServer((req, res) => {
                 ? vocRaw
                 : '';
 
-        const needsManaRaw =
-            String(
-                urlObj.searchParams.get('needsMana') || ''
-            ).toLowerCase();
-
         const needsMana =
-            needsManaRaw === '1' ||
-            needsManaRaw === 'true' ||
-            needsManaRaw === 'yes';
+            parseBoolean(
+                urlObj.searchParams.get(
+                    'needsMana'
+                )
+            );
 
         const target =
-            normalizarNome(
-                urlObj.searchParams.get('target') || '',
-                50
+            normalizarTexto(
+                urlObj.searchParams.get(
+                    'target'
+                ) || '',
+                50,
+                true
+            );
+
+        const alive =
+            parseBoolean(
+                urlObj.searchParams.get(
+                    'alive'
+                )
+            );
+
+        const leaderRequested =
+            parseBoolean(
+                urlObj.searchParams.get(
+                    'leaderActive'
+                )
+            );
+
+        const leaderRank =
+            parseLeaderRank(
+                urlObj.searchParams.get(
+                    'leaderRank'
+                )
             );
 
         // ==========================================
-        // VALIDA TOKEN
+        // VALIDA SESSAO
         // ==========================================
 
         const sessao =
-            validarSessao(token);
+            validarSessao(
+                token
+            );
 
         if (!sessao) {
-            responderJson(res, 401, {
-                auth: false,
-                msg: 'Sessao invalida ou expirada.'
-            });
+            responderJson(
+                res,
+                401,
+                {
+                    auth: false,
+                    msg:
+                        'Sessao invalida ou expirada.'
+                }
+            );
 
             return;
         }
@@ -464,25 +1068,37 @@ const server = http.createServer((req, res) => {
         if (
             !name ||
             name.toLowerCase() !==
-            sessao.name.toLowerCase()
+                sessao.name.toLowerCase()
         ) {
-            responderJson(res, 403, {
-                auth: false,
-                msg: 'Personagem nao corresponde a sessao.'
-            });
+            responderJson(
+                res,
+                403,
+                {
+                    auth: false,
+                    msg:
+                        'Personagem nao corresponde a sessao.'
+                }
+            );
 
             return;
         }
 
         // ==========================================
-        // CONFERE SALA
+        // CONFERE CANAL
         // ==========================================
 
-        if (!salaValida(room)) {
-            responderJson(res, 400, {
-                auth: false,
-                msg: 'Canal invalido.'
-            });
+        if (
+            !salaValida(room)
+        ) {
+            responderJson(
+                res,
+                400,
+                {
+                    auth: false,
+                    msg:
+                        'Canal invalido.'
+                }
+            );
 
             return;
         }
@@ -490,42 +1106,137 @@ const server = http.createServer((req, res) => {
         const agora =
             Date.now();
 
-        // Renova sessao enquanto estiver usando
+        const registro =
+            chavesValidas[
+                sessao.key
+            ];
+
+        // ==========================================
+        // RENOVA SESSAO
+        // ==========================================
+
         sessao.lastSeen =
             agora;
 
         sessao.expiresAt =
-            agora + SESSION_TTL_MS;
+            agora +
+            SESSION_TTL_MS;
 
         // ==========================================
-        // ATUALIZA JOGADOR ONLINE
+        // ATUALIZA PLAYER ONLINE
         // ==========================================
 
-        conectadosMap.set(token, {
-            name: sessao.name,
+        conectadosMap.set(
+            token,
+            {
+                name:
+                    sessao.name,
+
+                room,
+
+                voc,
+
+                needsMana,
+
+                target,
+
+                alive,
+
+                timestamp:
+                    agora
+            }
+        );
+
+        // ==========================================
+        // PROCESSA LEADER
+        // ==========================================
+
+        let myLeader;
+
+        if (
+            leaderRequested
+        ) {
+            myLeader =
+                processLeaderRequest({
+                    token,
+                    sessao,
+                    registro,
+                    room,
+
+                    requestedActive:
+                        true,
+
+                    requestedRank:
+                        leaderRank,
+
+                    alive,
+
+                    target,
+
+                    agora
+                });
+
+        } else {
+            // Membro normal
+            // ou Leader que desligou o botao.
+            //
+            // Libera imediatamente
+            // qualquer vaga de Leader.
+
+            myLeader =
+                processLeaderRequest({
+                    token,
+                    sessao,
+                    registro,
+                    room,
+
+                    requestedActive:
+                        false,
+
+                    requestedRank:
+                        0,
+
+                    alive,
+
+                    target,
+
+                    agora
+                });
+        }
+
+        // ==========================================
+        // HEARTBEAT DO LEADER
+        // ==========================================
+
+        updateOwnedLeaderHeartbeat(
+            token,
             room,
-            voc,
-            needsMana,
+            alive,
             target,
-            timestamp: agora
-        });
+            agora
+        );
 
         // ==========================================
-        // LISTA DE JOGADORES DA SALA
+        // JOGADORES DO MESMO CANAL
         // ==========================================
 
         const playersByName =
             new Map();
 
         for (
-            const [outroToken, data]
+            const [
+                outroToken,
+                data
+            ]
             of conectadosMap.entries()
         ) {
-            // Remove jogador offline
             if (
-                agora - data.timestamp >
+                agora -
+                    data.timestamp >
                     PLAYER_TIMEOUT_MS ||
-                !validarSessao(outroToken)
+                !validarSessao(
+                    outroToken
+                )
             ) {
                 conectadosMap.delete(
                     outroToken
@@ -534,8 +1245,9 @@ const server = http.createServer((req, res) => {
                 continue;
             }
 
-            // Mesmo canal
-            if (data.room === room) {
+            if (
+                data.room === room
+            ) {
                 playersByName.set(
                     data.name.toLowerCase(),
                     {
@@ -551,14 +1263,19 @@ const server = http.createServer((req, res) => {
                             ),
 
                         target:
-                            data.target || ''
+                            data.target || '',
+
+                        alive:
+                            Boolean(
+                                data.alive
+                            )
                     }
                 );
             }
         }
 
         // ==========================================
-        // ORDENA POR NOME
+        // ORDENA JOGADORES
         // ==========================================
 
         const players =
@@ -566,31 +1283,53 @@ const server = http.createServer((req, res) => {
                 .from(
                     playersByName.values()
                 )
-                .sort((a, b) =>
-                    a.name.localeCompare(
-                        b.name,
-                        'pt-BR',
-                        {
-                            sensitivity: 'base'
-                        }
-                    )
+                .sort(
+                    (a, b) =>
+                        a.name.localeCompare(
+                            b.name,
+                            'pt-BR',
+                            {
+                                sensitivity:
+                                    'base'
+                            }
+                        )
                 );
 
         // ==========================================
-        // RESPOSTA
+        // RETORNA L1 / L2 / L3
         // ==========================================
 
-        responderJson(res, 200, {
-            auth: true,
-            room,
+        const leaders =
+            buildLeadersResponse(
+                room,
+                agora
+            );
 
-            members:
-                players.map(
-                    (p) => p.name
-                ),
+        // ==========================================
+        // RESPOSTA FINAL
+        // ==========================================
 
-            players
-        });
+        responderJson(
+            res,
+            200,
+            {
+                auth: true,
+
+                room,
+
+                members:
+                    players.map(
+                        (p) =>
+                            p.name
+                    ),
+
+                players,
+
+                leaders,
+
+                myLeader
+            }
+        );
 
         return;
     }
@@ -599,18 +1338,26 @@ const server = http.createServer((req, res) => {
     // ROTA NAO ENCONTRADA
     // ==========================================
 
-    responderJson(res, 404, {
-        ok: false,
-        msg: 'Rota nao encontrada.'
-    });
+    responderJson(
+        res,
+        404,
+        {
+            ok: false,
+            msg:
+                'Rota nao encontrada.'
+        }
+    );
 });
 
 // ==========================================
 // INICIA SERVIDOR
 // ==========================================
 
-server.listen(PORT, () => {
-    console.log(
-        `[Guild Server] Servidor HTTP rodando na porta ${PORT}`
-    );
-});
+server.listen(
+    PORT,
+    () => {
+        console.log(
+            `[Guild Server V4] Servidor HTTP rodando na porta ${PORT}`
+        );
+    }
+);
