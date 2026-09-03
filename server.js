@@ -4,31 +4,19 @@ const crypto = require('crypto');
 const PORT = Number(process.env.PORT) || 3000;
 
 // ==========================================
-// CONFIGURACOES
+// GUILD SERVER V7 / CLIENT V30
+// Heartbeat completo separado do canal rapido de combate.
 // ==========================================
 
 const PLAYER_TIMEOUT_MS = 30 * 1000;
 const LEADER_ACTIVE_TIMEOUT_MS = 5 * 1000;
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
-
 const AUTH_WINDOW_MS = 60 * 1000;
 const AUTH_MAX_ATTEMPTS = 10;
 
 
 // ==========================================
 // PRODUCT KEYS
-//
-// permiteLeader: true
-// = pode usar a versao Leader
-//
-// permiteLeader: false
-// = somente versao Membro
-//
-// personagens: []
-// = aceita qualquer personagem
-//
-// maxSessoes: 1
-// = uma sessao simultanea
 // ==========================================
 
 const chavesValidas = {
@@ -61,32 +49,30 @@ const chavesValidas = {
 
 
 // ==========================================
-// MEMORIA DO SERVIDOR
+// MEMORIA
 // ==========================================
 
 // token -> sessao
 const sessoes = new Map();
 
-// token -> estado do jogador
+// token -> player conectado pelo heartbeat
 const conectadosMap = new Map();
 
-// room -> Map(rank -> leader)
-//
-// Exemplo:
-//
-// 1031
-//   L1 -> Gustavo
-//   L2 -> Celson
-//   L3 -> Joao
-//
+// room -> Map(rank -> Leader)
 const leaderRooms = new Map();
 
-// Anti spam de autenticacao
+// room -> {
+//     seq,
+//     fingerprint
+// }
+const roomCombatVersions = new Map();
+
+// IP -> anti spam
 const authRateMap = new Map();
 
 
 // ==========================================
-// JSON RESPONSE
+// JSON
 // ==========================================
 
 function responderJson(
@@ -117,15 +103,13 @@ function responderJson(
 
 
 // ==========================================
-// IP DO CLIENTE
+// IP
 // ==========================================
 
 function getClientIp(req) {
 
     const forwarded =
-        req.headers[
-            'x-forwarded-for'
-        ];
+        req.headers['x-forwarded-for'];
 
     if (forwarded) {
 
@@ -144,7 +128,7 @@ function getClientIp(req) {
 
 
 // ==========================================
-// ANTI SPAM /AUTH
+// ANTI SPAM AUTH
 // ==========================================
 
 function authPermitido(req) {
@@ -157,6 +141,7 @@ function authPermitido(req) {
 
     const atual =
         authRateMap.get(ip);
+
 
     if (
         !atual ||
@@ -176,6 +161,7 @@ function authPermitido(req) {
 
     }
 
+
     if (
         atual.count >=
         AUTH_MAX_ATTEMPTS
@@ -185,6 +171,7 @@ function authPermitido(req) {
 
     }
 
+
     atual.count += 1;
 
     return true;
@@ -193,7 +180,7 @@ function authPermitido(req) {
 
 
 // ==========================================
-// NORMALIZACAO DE TEXTO
+// TEXTO
 // ==========================================
 
 function normalizarTexto(
@@ -210,8 +197,10 @@ function normalizarTexto(
 
     }
 
+
     const texto =
         value.trim();
+
 
     if (!texto) {
 
@@ -221,6 +210,7 @@ function normalizarTexto(
 
     }
 
+
     if (
         texto.length > max
     ) {
@@ -229,18 +219,15 @@ function normalizarTexto(
 
     }
 
-    // Bloqueia caracteres
-    // de controle
 
     if (
-        /[\x00-\x1F\x7F]/.test(
-            texto
-        )
+        /[\x00-\x1F\x7F]/.test(texto)
     ) {
 
         return '';
 
     }
+
 
     return texto;
 
@@ -262,18 +249,16 @@ function normalizarNome(
 
 
 // ==========================================
-// VALIDACAO DE CANAL
+// SALA
 // ==========================================
 
 function salaValida(value) {
 
     return (
-
         typeof value === 'string' &&
-
-        /^[A-Za-z0-9_-]{1,32}$/
-            .test(value)
-
+        /^[A-Za-z0-9_-]{1,32}$/.test(
+            value
+        )
     );
 
 }
@@ -308,16 +293,12 @@ function parseBoolean(value) {
         .trim()
         .toLowerCase();
 
+
     return (
-
         raw === '1' ||
-
         raw === 'true' ||
-
         raw === 'yes' ||
-
         raw === 'on'
-
     );
 
 }
@@ -332,27 +313,25 @@ function parseLeaderRank(value) {
     const rank =
         Number(value);
 
+
     if (
-        !Number.isInteger(rank) ||
-        rank < 1 ||
-        rank > 3
+        Number.isInteger(rank) &&
+        rank >= 1 &&
+        rank <= 3
     ) {
 
-        return 0;
+        return rank;
 
     }
 
-    return rank;
+
+    return 0;
 
 }
 
 
 // ==========================================
-// COMBAT MODE
-//
-// PVP
-// PVE
-// OFF
+// PVP / PVE / OFF
 // ==========================================
 
 function parseCombatMode(value) {
@@ -364,6 +343,7 @@ function parseCombatMode(value) {
         .trim()
         .toUpperCase();
 
+
     if (
         mode === 'PVP' ||
         mode === 'PVE'
@@ -373,13 +353,41 @@ function parseCombatMode(value) {
 
     }
 
+
     return 'OFF';
 
 }
 
 
 // ==========================================
-// PERSONAGEM AUTORIZADO
+// TARGET ID
+// ==========================================
+
+function parseTargetId(value) {
+
+    const id =
+        Number(
+            value || 0
+        );
+
+
+    if (
+        Number.isInteger(id) &&
+        id > 0
+    ) {
+
+        return id;
+
+    }
+
+
+    return 0;
+
+}
+
+
+// ==========================================
+// PERSONAGEM DA KEY
 // ==========================================
 
 function personagemPermitido(
@@ -391,7 +399,6 @@ function personagemPermitido(
         !Array.isArray(
             registro.personagens
         ) ||
-
         registro.personagens.length === 0
     ) {
 
@@ -399,15 +406,18 @@ function personagemPermitido(
 
     }
 
+
     const alvo =
         nome.toLowerCase();
 
-    return registro.personagens.some(
-        (personagem) =>
 
-            String(personagem)
+    return registro.personagens.some(
+        (p) =>
+
+            String(p)
                 .trim()
                 .toLowerCase()
+
             === alvo
     );
 
@@ -439,6 +449,7 @@ function getLeaderMap(
     let map =
         leaderRooms.get(room);
 
+
     if (
         !map &&
         create
@@ -447,6 +458,7 @@ function getLeaderMap(
         map =
             new Map();
 
+
         leaderRooms.set(
             room,
             map
@@ -454,18 +466,17 @@ function getLeaderMap(
 
     }
 
+
     return map || null;
 
 }
 
 
 // ==========================================
-// PROCURA SLOT DO TOKEN
+// PROCURA LEADER PELO TOKEN
 // ==========================================
 
-function findLeaderSlotByToken(
-    token
-) {
+function findLeaderSlotByToken(token) {
 
     for (
         const [room, map]
@@ -493,13 +504,286 @@ function findLeaderSlotByToken(
 
     }
 
+
     return null;
 
 }
 
 
 // ==========================================
-// LIBERA SLOT DE LEADER
+// SEQUENCIA DE COMBATE
+// ==========================================
+
+function getRoomVersion(room) {
+
+    let state =
+        roomCombatVersions.get(
+            room
+        );
+
+
+    if (!state) {
+
+        state = {
+            seq: 0,
+            fingerprint: ''
+        };
+
+
+        roomCombatVersions.set(
+            room,
+            state
+        );
+
+    }
+
+
+    return state;
+
+}
+
+
+// ==========================================
+// MONTA L1 / L2 / L3
+// ==========================================
+
+function buildLeadersRaw(
+    room,
+    agora = Date.now()
+) {
+
+    const map =
+        getLeaderMap(
+            room,
+            false
+        );
+
+
+    const result = [];
+
+
+    for (
+        let rank = 1;
+        rank <= 3;
+        rank += 1
+    ) {
+
+        const slot =
+            map
+                ? map.get(rank)
+                : null;
+
+
+        if (!slot) {
+
+            result.push({
+
+                rank,
+
+                occupied:
+                    false,
+
+                name:
+                    '',
+
+                alive:
+                    false,
+
+                online:
+                    false,
+
+                operational:
+                    false,
+
+                target:
+                    '',
+
+                targetId:
+                    0,
+
+                combatMode:
+                    'OFF'
+
+            });
+
+
+            continue;
+
+        }
+
+
+        const online =
+
+            agora -
+                slot.lastHeartbeat
+
+            <= LEADER_ACTIVE_TIMEOUT_MS;
+
+
+        const alive =
+            Boolean(
+                slot.alive
+            );
+
+
+        result.push({
+
+            rank,
+
+            occupied:
+                true,
+
+            name:
+                slot.name,
+
+            alive,
+
+            online,
+
+            operational:
+                online &&
+                alive,
+
+            target:
+                slot.target || '',
+
+            targetId:
+                Number(
+                    slot.targetId
+                ) || 0,
+
+            combatMode:
+                parseCombatMode(
+                    slot.combatMode
+                )
+
+        });
+
+    }
+
+
+    return result;
+
+}
+
+
+// ==========================================
+// COMMANDER
+// L1 -> L2 -> L3
+// ==========================================
+
+function buildCommanderFromLeaders(
+    leaders
+) {
+
+    for (
+        const leader
+        of leaders
+    ) {
+
+        if (
+            leader.occupied &&
+            leader.operational
+        ) {
+
+            return {
+
+                rank:
+                    leader.rank,
+
+                name:
+                    leader.name,
+
+                operational:
+                    true,
+
+                combatMode:
+                    parseCombatMode(
+                        leader.combatMode
+                    ),
+
+                target:
+                    leader.target || '',
+
+                targetId:
+                    Number(
+                        leader.targetId
+                    ) || 0
+
+            };
+
+        }
+
+    }
+
+
+    return null;
+
+}
+
+
+// ==========================================
+// ATUALIZA TARGET SEQ
+// ==========================================
+
+function refreshCombatVersion(
+    room,
+    agora = Date.now()
+) {
+
+    const leaders =
+        buildLeadersRaw(
+            room,
+            agora
+        );
+
+
+    const commander =
+        buildCommanderFromLeaders(
+            leaders
+        );
+
+
+    const fingerprint =
+        JSON.stringify({
+            leaders,
+            commander
+        });
+
+
+    const state =
+        getRoomVersion(room);
+
+
+    if (
+        state.fingerprint !==
+        fingerprint
+    ) {
+
+        state.seq += 1;
+
+        state.fingerprint =
+            fingerprint;
+
+    }
+
+
+    return {
+
+        seq:
+            state.seq,
+
+        leaders,
+
+        commander
+
+    };
+
+}
+
+
+// ==========================================
+// REMOVE LEADER
 // ==========================================
 
 function releaseLeaderToken(
@@ -507,6 +791,10 @@ function releaseLeaderToken(
     exceptRoom = null,
     exceptRank = 0
 ) {
+
+    const touched =
+        new Set();
+
 
     for (
         const [room, map]
@@ -533,9 +821,12 @@ function releaseLeaderToken(
 
                 map.delete(rank);
 
+                touched.add(room);
+
             }
 
         }
+
 
         if (
             map.size === 0
@@ -549,6 +840,23 @@ function releaseLeaderToken(
 
     }
 
+
+    const agora =
+        Date.now();
+
+
+    for (
+        const room
+        of touched
+    ) {
+
+        refreshCombatVersion(
+            room,
+            agora
+        );
+
+    }
+
 }
 
 
@@ -558,11 +866,17 @@ function releaseLeaderToken(
 
 function apagarSessao(token) {
 
-    sessoes.delete(token);
+    sessoes.delete(
+        token
+    );
 
-    conectadosMap.delete(token);
+    conectadosMap.delete(
+        token
+    );
 
-    releaseLeaderToken(token);
+    releaseLeaderToken(
+        token
+    );
 
 }
 
@@ -582,8 +896,10 @@ function validarSessao(token) {
 
     }
 
+
     const sessao =
         sessoes.get(token);
+
 
     if (!sessao) {
 
@@ -591,39 +907,44 @@ function validarSessao(token) {
 
     }
 
+
     const agora =
         Date.now();
 
-    // Token expirado
 
     if (
         agora >=
         sessao.expiresAt
     ) {
 
-        apagarSessao(token);
+        apagarSessao(
+            token
+        );
 
         return null;
 
     }
 
-    // Key ainda existe?
 
     const registro =
         chavesValidas[
             sessao.key
         ];
 
+
     if (
         !registro ||
         !registro.ativo
     ) {
 
-        apagarSessao(token);
+        apagarSessao(
+            token
+        );
 
         return null;
 
     }
+
 
     return sessao;
 
@@ -631,7 +952,7 @@ function validarSessao(token) {
 
 
 // ==========================================
-// CONTROLE DE SESSOES POR KEY
+// MAX SESSOES
 // ==========================================
 
 function prepararNovaSessao(
@@ -640,6 +961,7 @@ function prepararNovaSessao(
 ) {
 
     const existentes = [];
+
 
     for (
         const [token, sessao]
@@ -654,6 +976,7 @@ function prepararNovaSessao(
 
         }
 
+
         if (
             !validarSessao(token)
         ) {
@@ -662,12 +985,14 @@ function prepararNovaSessao(
 
         }
 
+
         existentes.push({
             token,
             sessao
         });
 
     }
+
 
     existentes.sort(
         (a, b) =>
@@ -676,6 +1001,7 @@ function prepararNovaSessao(
             b.sessao.createdAt
     );
 
+
     while (
         existentes.length >=
         maxSessoes
@@ -683,6 +1009,7 @@ function prepararNovaSessao(
 
         const antiga =
             existentes.shift();
+
 
         apagarSessao(
             antiga.token
@@ -694,12 +1021,16 @@ function prepararNovaSessao(
 
 
 // ==========================================
-// LIMPEZA DOS LEADERS
+// LIMPA LEADERS
 // ==========================================
 
 function cleanupLeaderRooms(
     agora = Date.now()
 ) {
+
+    const touched =
+        new Set();
+
 
     for (
         const [room, map]
@@ -718,23 +1049,32 @@ function cleanupLeaderRooms(
                     slot.token
                 );
 
+
             const expired =
 
                 agora -
-                    slot.lastHeartbeat >
+                    slot.lastHeartbeat
 
-                PLAYER_TIMEOUT_MS;
+                > PLAYER_TIMEOUT_MS;
+
 
             if (
                 !sessao ||
                 expired
             ) {
 
-                map.delete(rank);
+                map.delete(
+                    rank
+                );
+
+                touched.add(
+                    room
+                );
 
             }
 
         }
+
 
         if (
             map.size === 0
@@ -748,98 +1088,46 @@ function cleanupLeaderRooms(
 
     }
 
+
+    for (
+        const room
+        of touched
+    ) {
+
+        refreshCombatVersion(
+            room,
+            agora
+        );
+
+    }
+
 }
 
 
 // ==========================================
-// LIMPEZA GERAL
+// SNAPSHOT RAPIDO
 // ==========================================
 
-function limparExpirados() {
-
-    const agora =
-        Date.now();
-
-    // Sessoes
-
-    for (
-        const token
-        of Array.from(
-            sessoes.keys()
-        )
-    ) {
-
-        validarSessao(token);
-
-    }
-
-    // Players offline
-
-    for (
-        const [token, data]
-        of conectadosMap.entries()
-    ) {
-
-        if (
-
-            agora -
-                data.timestamp >
-
-                PLAYER_TIMEOUT_MS ||
-
-            !validarSessao(token)
-
-        ) {
-
-            conectadosMap.delete(
-                token
-            );
-
-        }
-
-    }
-
-    // Leaders
+function getCombatSnapshot(
+    room,
+    agora = Date.now()
+) {
 
     cleanupLeaderRooms(
         agora
     );
 
-    // Anti spam
 
-    for (
-        const [ip, data]
-        of authRateMap.entries()
-    ) {
-
-        if (
-
-            agora -
-                data.startedAt >
-
-            AUTH_WINDOW_MS * 2
-
-        ) {
-
-            authRateMap.delete(
-                ip
-            );
-
-        }
-
-    }
+    return refreshCombatVersion(
+        room,
+        agora
+    );
 
 }
 
 
-setInterval(
-    limparExpirados,
-    10 * 1000
-).unref();
-
-
 // ==========================================
-// PROCESSA PEDIDO DE LEADER
+// PEDIDO DE LEADER
 // ==========================================
 
 function processLeaderRequest({
@@ -886,13 +1174,17 @@ function processLeaderRequest({
             token
         );
 
+
         return {
 
-            accepted: true,
+            accepted:
+                true,
 
-            active: false,
+            active:
+                false,
 
-            rank: 0,
+            rank:
+                0,
 
             msg:
                 'Combo Leader OFF.'
@@ -907,24 +1199,25 @@ function processLeaderRequest({
     // ==========================================
 
     if (
-
         !registro ||
-
         registro.permiteLeader !== true
-
     ) {
 
         releaseLeaderToken(
             token
         );
 
+
         return {
 
-            accepted: false,
+            accepted:
+                false,
 
-            active: false,
+            active:
+                false,
 
-            rank: 0,
+            rank:
+                0,
 
             msg:
                 'Sua licenca nao possui acesso ao Combo Leader.'
@@ -935,20 +1228,18 @@ function processLeaderRequest({
 
 
     // ==========================================
-    // RANK INVALIDO
+    // RANK
     // ==========================================
 
     if (
-
         requestedRank < 1 ||
-
         requestedRank > 3
-
     ) {
 
         return {
 
-            accepted: false,
+            accepted:
+                false,
 
             active:
                 Boolean(
@@ -982,15 +1273,12 @@ function processLeaderRequest({
 
 
     // ==========================================
-    // SLOT JA OCUPADO
+    // SLOT OCUPADO
     // ==========================================
 
     if (
-
         occupied &&
-
         occupied.token !== token
-
     ) {
 
         const occupiedSession =
@@ -1002,22 +1290,20 @@ function processLeaderRequest({
         const slotExpired =
 
             agora -
-                occupied.lastHeartbeat >
+                occupied.lastHeartbeat
 
-            PLAYER_TIMEOUT_MS;
+            > PLAYER_TIMEOUT_MS;
 
 
         if (
-
             occupiedSession &&
-
             !slotExpired
-
         ) {
 
             return {
 
-                accepted: false,
+                accepted:
+                    false,
 
                 active:
                     Boolean(
@@ -1086,16 +1372,9 @@ function processLeaderRequest({
                 target || '',
 
             targetId:
-
-                Number.isInteger(
+                parseTargetId(
                     targetId
-                ) &&
-
-                targetId > 0
-
-                    ? targetId
-
-                    : 0,
+                ),
 
             combatMode:
                 parseCombatMode(
@@ -1107,7 +1386,7 @@ function processLeaderRequest({
     );
 
 
-    // Remove outro slot do mesmo jogador
+    // Um jogador so pode possuir um slot.
 
     releaseLeaderToken(
         token,
@@ -1116,11 +1395,19 @@ function processLeaderRequest({
     );
 
 
+    refreshCombatVersion(
+        room,
+        agora
+    );
+
+
     return {
 
-        accepted: true,
+        accepted:
+            true,
 
-        active: true,
+        active:
+            true,
 
         rank:
             requestedRank,
@@ -1134,7 +1421,7 @@ function processLeaderRequest({
 
 
 // ==========================================
-// HEARTBEAT DO LEADER
+// HEARTBEAT NORMAL DO LEADER
 // ==========================================
 
 function updateOwnedLeaderHeartbeat(
@@ -1162,11 +1449,8 @@ function updateOwnedLeaderHeartbeat(
 
 
     if (
-
         !owned ||
-
         owned.room !== room
-
     ) {
 
         return;
@@ -1189,16 +1473,9 @@ function updateOwnedLeaderHeartbeat(
 
 
     owned.slot.targetId =
-
-        Number.isInteger(
+        parseTargetId(
             targetId
-        ) &&
-
-        targetId > 0
-
-            ? targetId
-
-            : 0;
+        );
 
 
     owned.slot.combatMode =
@@ -1206,271 +1483,308 @@ function updateOwnedLeaderHeartbeat(
             combatMode
         );
 
-}
 
-
-// ==========================================
-// LISTA L1 / L2 / L3
-// ==========================================
-
-function buildLeadersResponse(
-
-    room,
-
-    agora = Date.now()
-
-) {
-
-    cleanupLeaderRooms(
+    refreshCombatVersion(
+        room,
         agora
     );
-
-
-    const map =
-        getLeaderMap(
-            room,
-            false
-        );
-
-
-    const result = [];
-
-
-    for (
-        let rank = 1;
-        rank <= 3;
-        rank += 1
-    ) {
-
-        const slot =
-
-            map
-
-                ? map.get(rank)
-
-                : null;
-
-
-        // ==========================================
-        // LIVRE
-        // ==========================================
-
-        if (!slot) {
-
-            result.push({
-
-                rank,
-
-                occupied: false,
-
-                name: '',
-
-                alive: false,
-
-                online: false,
-
-                operational: false,
-
-                target: '',
-
-                targetId: 0,
-
-                combatMode:
-                    'OFF'
-
-            });
-
-            continue;
-
-        }
-
-
-        const online =
-
-            agora -
-                slot.lastHeartbeat <=
-
-            LEADER_ACTIVE_TIMEOUT_MS;
-
-
-        const alive =
-            Boolean(
-                slot.alive
-            );
-
-
-        result.push({
-
-            rank,
-
-            occupied:
-                true,
-
-            name:
-                slot.name,
-
-            alive,
-
-            online,
-
-            operational:
-
-                online &&
-
-                alive,
-
-            target:
-                slot.target || '',
-
-            targetId:
-                Number(
-                    slot.targetId
-                ) || 0,
-
-            combatMode:
-                parseCombatMode(
-                    slot.combatMode
-                )
-
-        });
-
-    }
-
-
-    return result;
 
 }
 
 
 // ==========================================
-// LEADER QUE COMANDA A SALA
+// FAST COMBAT UPDATE
 //
-// L1
-// ↓
-// L2
-// ↓
-// L3
+// MUITO IMPORTANTE:
 //
-// Precisa estar:
-// - online
-// - vivo
+// Esta funcao NAO atualiza lastHeartbeat.
+// Portanto o fast sync de combate NAO substitui
+// o heartbeat completo de 1500ms.
 // ==========================================
 
-function buildCommanderResponse(
+function updateOwnedLeaderCombat(
+
+    token,
 
     room,
 
-    agora = Date.now()
+    alive,
+
+    target,
+
+    targetId,
+
+    combatMode,
+
+    agora
 
 ) {
 
-    cleanupLeaderRooms(
-        agora
-    );
-
-
-    const map =
-        getLeaderMap(
-            room,
-            false
+    const owned =
+        findLeaderSlotByToken(
+            token
         );
 
 
-    if (!map) {
+    if (
+        !owned ||
+        owned.room !== room
+    ) {
 
-        return null;
+        return false;
 
     }
 
 
+    owned.slot.alive =
+        Boolean(
+            alive
+        );
+
+
+    owned.slot.target =
+        target || '';
+
+
+    owned.slot.targetId =
+        parseTargetId(
+            targetId
+        );
+
+
+    owned.slot.combatMode =
+        parseCombatMode(
+            combatMode
+        );
+
+
+    refreshCombatVersion(
+        room,
+        agora
+    );
+
+
+    return true;
+
+}
+
+
+// ==========================================
+// LIMPEZA
+// ==========================================
+
+function limparExpirados() {
+
+    const agora =
+        Date.now();
+
+
+    // Sessoes
+
     for (
-
-        let rank = 1;
-
-        rank <= 3;
-
-        rank += 1
-
+        const token
+        of Array.from(
+            sessoes.keys()
+        )
     ) {
 
-        const slot =
-            map.get(rank);
+        validarSessao(
+            token
+        );
+
+    }
 
 
-        if (!slot) {
+    // Players
 
-            continue;
-
-        }
-
-
-        const online =
-
-            agora -
-                slot.lastHeartbeat <=
-
-            LEADER_ACTIVE_TIMEOUT_MS;
-
-
-        const alive =
-            Boolean(
-                slot.alive
-            );
-
-
-        // ==========================================
-        // PRIMEIRO LEADER OPERACIONAL
-        // ==========================================
+    for (
+        const [token, data]
+        of conectadosMap.entries()
+    ) {
 
         if (
 
-            online &&
+            agora -
+                data.timestamp
 
-            alive
+            > PLAYER_TIMEOUT_MS ||
+
+            !validarSessao(
+                token
+            )
 
         ) {
 
-            return {
-
-                rank,
-
-                name:
-                    slot.name,
-
-                operational:
-                    true,
-
-                combatMode:
-                    parseCombatMode(
-                        slot.combatMode
-                    ),
-
-                target:
-                    slot.target || '',
-
-                targetId:
-                    Number(
-                        slot.targetId
-                    ) || 0
-
-            };
+            conectadosMap.delete(
+                token
+            );
 
         }
 
     }
 
 
-    return null;
+    // Leaders
+
+    cleanupLeaderRooms(
+        agora
+    );
+
+
+    // Anti spam
+
+    for (
+        const [ip, data]
+        of authRateMap.entries()
+    ) {
+
+        if (
+
+            agora -
+                data.startedAt
+
+            > AUTH_WINDOW_MS * 2
+
+        ) {
+
+            authRateMap.delete(
+                ip
+            );
+
+        }
+
+    }
+
+}
+
+
+setInterval(
+    limparExpirados,
+    10 * 1000
+).unref();
+
+
+// ==========================================
+// VALIDA TOKEN + NOME + SALA
+// ==========================================
+
+function validarIdentidadeDeRequest(
+    urlObj
+) {
+
+    const token =
+        urlObj.searchParams.get(
+            'token'
+        ) || '';
+
+
+    const room =
+
+        urlObj.searchParams.get(
+            'room'
+        ) ||
+
+        urlObj.searchParams.get(
+            'pass'
+        ) ||
+
+        '';
+
+
+    const name =
+        normalizarNome(
+
+            urlObj.searchParams.get(
+                'name'
+            )
+
+        );
+
+
+    const sessao =
+        validarSessao(
+            token
+        );
+
+
+    if (!sessao) {
+
+        return {
+
+            error: [
+                401,
+                {
+                    auth: false,
+                    msg:
+                        'Sessao invalida ou expirada.'
+                }
+            ]
+
+        };
+
+    }
+
+
+    if (
+
+        !name ||
+
+        name.toLowerCase() !==
+            sessao.name.toLowerCase()
+
+    ) {
+
+        return {
+
+            error: [
+                403,
+                {
+                    auth: false,
+                    msg:
+                        'Personagem nao corresponde a sessao.'
+                }
+            ]
+
+        };
+
+    }
+
+
+    if (
+        !salaValida(room)
+    ) {
+
+        return {
+
+            error: [
+                400,
+                {
+                    auth: false,
+                    msg:
+                        'Canal invalido.'
+                }
+            ]
+
+        };
+
+    }
+
+
+    return {
+        token,
+        room,
+        name,
+        sessao
+    };
 
 }
 
 
 // ==========================================
-// SERVIDOR HTTP
+// HTTP SERVER
 // ==========================================
 
 const server =
-
     http.createServer(
 
         (req, res) => {
@@ -1509,7 +1823,8 @@ const server =
 
                     {
 
-                        ok: false,
+                        ok:
+                            false,
 
                         msg:
                             'Requisicao invalida.'
@@ -1524,1061 +1839,1138 @@ const server =
             }
 
 
-            // ==========================================
-            // HEALTH
-            // ==========================================
+// ==========================================
+// HEALTH
+// ==========================================
 
-            if (
+if (
+    urlObj.pathname === '/' ||
+    urlObj.pathname === '/health'
+) {
 
-                urlObj.pathname === '/' ||
-
-                urlObj.pathname === '/health'
-
-            ) {
-
-                cleanupLeaderRooms();
+    cleanupLeaderRooms();
 
 
-                responderJson(
+    responderJson(
 
-                    res,
+        res,
 
-                    200,
+        200,
 
-                    {
+        {
 
-                        ok: true,
+            ok:
+                true,
 
-                        service:
-                            'guild-server-v6',
+            service:
+                'guild-server-v7',
 
-                        online:
-                            conectadosMap.size,
+            online:
+                conectadosMap.size,
 
-                        sessions:
-                            sessoes.size,
+            sessions:
+                sessoes.size,
 
-                        leaderRooms:
-                            leaderRooms.size
+            leaderRooms:
+                leaderRooms.size
 
-                    }
+        }
 
-                );
+    );
 
 
-                return;
+    return;
+
+}
+
+
+// ==========================================
+// AUTH
+// ==========================================
+
+if (
+    urlObj.pathname === '/auth'
+) {
+
+    if (
+        req.method !== 'GET'
+    ) {
+
+        responderJson(
+
+            res,
+
+            405,
+
+            {
+
+                auth:
+                    false,
+
+                msg:
+                    'Metodo nao permitido.'
 
             }
 
+        );
 
-            // ==========================================
-            // AUTH
-            // ==========================================
 
-            if (
+        return;
 
-                urlObj.pathname === '/auth'
+    }
 
-            ) {
 
+    if (
+        !authPermitido(req)
+    ) {
 
-                if (
+        responderJson(
 
-                    req.method !== 'GET'
+            res,
 
-                ) {
+            429,
 
+            {
 
-                    responderJson(
+                auth:
+                    false,
 
-                        res,
-
-                        405,
-
-                        {
-
-                            auth: false,
-
-                            msg:
-                                'Metodo nao permitido.'
-
-                        }
-
-                    );
-
-
-                    return;
-
-                }
-
-
-                // ==========================================
-                // ANTI SPAM
-                // ==========================================
-
-                if (
-
-                    !authPermitido(req)
-
-                ) {
-
-
-                    responderJson(
-
-                        res,
-
-                        429,
-
-                        {
-
-                            auth: false,
-
-                            msg:
-                                'Muitas tentativas. Aguarde um minuto.'
-
-                        }
-
-                    );
-
-
-                    return;
-
-                }
-
-
-                const key =
-
-                    urlObj.searchParams.get(
-                        'key'
-                    ) || '';
-
-
-                const name =
-
-                    normalizarNome(
-
-                        urlObj.searchParams.get(
-                            'name'
-                        )
-
-                    );
-
-
-                const registro =
-                    chavesValidas[key];
-
-
-                // ==========================================
-                // DADOS AUSENTES
-                // ==========================================
-
-                if (
-
-                    !key ||
-
-                    !name
-
-                ) {
-
-
-                    responderJson(
-
-                        res,
-
-                        400,
-
-                        {
-
-                            auth: false,
-
-                            msg:
-                                'Key ou personagem nao informado.'
-
-                        }
-
-                    );
-
-
-                    return;
-
-                }
-
-
-                // ==========================================
-                // KEY INVALIDA
-                // ==========================================
-
-                if (
-
-                    !registro ||
-
-                    !registro.ativo
-
-                ) {
-
-
-                    responderJson(
-
-                        res,
-
-                        401,
-
-                        {
-
-                            auth: false,
-
-                            msg:
-                                'Key invalida ou expirada.'
-
-                        }
-
-                    );
-
-
-                    return;
-
-                }
-
-
-                // ==========================================
-                // PERSONAGEM
-                // ==========================================
-
-                if (
-
-                    !personagemPermitido(
-
-                        registro,
-
-                        name
-
-                    )
-
-                ) {
-
-
-                    responderJson(
-
-                        res,
-
-                        403,
-
-                        {
-
-                            auth: false,
-
-                            msg:
-                                'Personagem nao autorizado para esta key.'
-
-                        }
-
-                    );
-
-
-                    return;
-
-                }
-
-
-                // ==========================================
-                // MAX SESSOES
-                // ==========================================
-
-                const maxSessoes =
-
-                    Math.max(
-
-                        1,
-
-                        Number(
-
-                            registro.maxSessoes
-
-                        ) || 1
-
-                    );
-
-
-                prepararNovaSessao(
-
-                    key,
-
-                    maxSessoes
-
-                );
-
-
-                // ==========================================
-                // TOKEN
-                // ==========================================
-
-                const agora =
-                    Date.now();
-
-
-                const token =
-                    gerarToken();
-
-
-                sessoes.set(
-
-                    token,
-
-                    {
-
-                        key,
-
-                        name,
-
-                        dono:
-                            registro.dono || '',
-
-                        createdAt:
-                            agora,
-
-                        lastSeen:
-                            agora,
-
-                        expiresAt:
-
-                            agora +
-
-                            SESSION_TTL_MS
-
-                    }
-
-                );
-
-
-                responderJson(
-
-                    res,
-
-                    200,
-
-                    {
-
-                        auth:
-                            true,
-
-                        msg:
-                            'Licenca valida! Bem vindo.',
-
-                        token,
-
-                        expiresIn:
-                            SESSION_TTL_MS,
-
-                        leaderAllowed:
-
-                            registro.permiteLeader === true
-
-                    }
-
-                );
-
-
-                return;
+                msg:
+                    'Muitas tentativas. Aguarde um minuto.'
 
             }
 
+        );
 
-            // ==========================================
-            // SYNC
-            // ==========================================
 
-            if (
+        return;
 
-                urlObj.pathname === '/sync'
+    }
 
-            ) {
 
+    const key =
+        urlObj.searchParams.get(
+            'key'
+        ) || '';
 
-                if (
 
-                    req.method !== 'GET'
+    const name =
+        normalizarNome(
 
-                ) {
+            urlObj.searchParams.get(
+                'name'
+            )
 
+        );
 
-                    responderJson(
 
-                        res,
+    const registro =
+        chavesValidas[
+            key
+        ];
 
-                        405,
 
-                        {
+    if (
+        !key ||
+        !name
+    ) {
 
-                            auth: false,
+        responderJson(
 
-                            msg:
-                                'Metodo nao permitido.'
+            res,
 
-                        }
+            400,
 
-                    );
+            {
 
+                auth:
+                    false,
 
-                    return;
-
-                }
-
-
-                // ==========================================
-                // PARAMETROS
-                // ==========================================
-
-                const token =
-
-                    urlObj.searchParams.get(
-                        'token'
-                    ) || '';
-
-
-                const room =
-
-                    urlObj.searchParams.get(
-                        'room'
-                    ) ||
-
-                    urlObj.searchParams.get(
-                        'pass'
-                    ) ||
-
-                    '';
-
-
-                const name =
-
-                    normalizarNome(
-
-                        urlObj.searchParams.get(
-                            'name'
-                        )
-
-                    );
-
-
-                const vocRaw =
-
-                    String(
-
-                        urlObj.searchParams.get(
-                            'voc'
-                        ) || ''
-
-                    ).toUpperCase();
-
-
-                const voc =
-
-                    vocacaoValida(
-                        vocRaw
-                    )
-
-                        ? vocRaw
-
-                        : '';
-
-
-                const needsMana =
-
-                    parseBoolean(
-
-                        urlObj.searchParams.get(
-                            'needsMana'
-                        )
-
-                    );
-
-
-                const target =
-
-                    normalizarTexto(
-
-                        urlObj.searchParams.get(
-                            'target'
-                        ) || '',
-
-                        50,
-
-                        true
-
-                    );
-
-
-                const targetIdRaw =
-
-                    Number(
-
-                        urlObj.searchParams.get(
-                            'targetId'
-                        ) || 0
-
-                    );
-
-
-                const targetId =
-
-                    Number.isInteger(
-                        targetIdRaw
-                    ) &&
-
-                    targetIdRaw > 0
-
-                        ? targetIdRaw
-
-                        : 0;
-
-
-                const alive =
-
-                    parseBoolean(
-
-                        urlObj.searchParams.get(
-                            'alive'
-                        )
-
-                    );
-
-
-                const combatMode =
-
-                    parseCombatMode(
-
-                        urlObj.searchParams.get(
-                            'combatMode'
-                        )
-
-                    );
-
-
-                const leaderRequested =
-
-                    parseBoolean(
-
-                        urlObj.searchParams.get(
-                            'leaderActive'
-                        )
-
-                    );
-
-
-                const leaderRank =
-
-                    parseLeaderRank(
-
-                        urlObj.searchParams.get(
-                            'leaderRank'
-                        )
-
-                    );
-
-
-                // ==========================================
-                // SESSAO
-                // ==========================================
-
-                const sessao =
-
-                    validarSessao(
-                        token
-                    );
-
-
-                if (!sessao) {
-
-
-                    responderJson(
-
-                        res,
-
-                        401,
-
-                        {
-
-                            auth:
-                                false,
-
-                            msg:
-                                'Sessao invalida ou expirada.'
-
-                        }
-
-                    );
-
-
-                    return;
-
-                }
-
-
-                // ==========================================
-                // PERSONAGEM
-                // ==========================================
-
-                if (
-
-                    !name ||
-
-                    name.toLowerCase() !==
-
-                    sessao.name.toLowerCase()
-
-                ) {
-
-
-                    responderJson(
-
-                        res,
-
-                        403,
-
-                        {
-
-                            auth:
-                                false,
-
-                            msg:
-                                'Personagem nao corresponde a sessao.'
-
-                        }
-
-                    );
-
-
-                    return;
-
-                }
-
-
-                // ==========================================
-                // CANAL
-                // ==========================================
-
-                if (
-
-                    !salaValida(room)
-
-                ) {
-
-
-                    responderJson(
-
-                        res,
-
-                        400,
-
-                        {
-
-                            auth:
-                                false,
-
-                            msg:
-                                'Canal invalido.'
-
-                        }
-
-                    );
-
-
-                    return;
-
-                }
-
-
-                const agora =
-                    Date.now();
-
-
-                const registro =
-
-                    chavesValidas[
-                        sessao.key
-                    ];
-
-
-                // ==========================================
-                // RENOVA TOKEN
-                // ==========================================
-
-                sessao.lastSeen =
-                    agora;
-
-
-                sessao.expiresAt =
-
-                    agora +
-
-                    SESSION_TTL_MS;
-
-
-                // ==========================================
-                // ATUALIZA PLAYER
-                // ==========================================
-
-                conectadosMap.set(
-
-                    token,
-
-                    {
-
-                        name:
-                            sessao.name,
-
-                        room,
-
-                        voc,
-
-                        needsMana,
-
-                        target,
-
-                        targetId,
-
-                        combatMode,
-
-                        alive,
-
-                        timestamp:
-                            agora
-
-                    }
-
-                );
-
-
-                // ==========================================
-                // LEADER
-                // ==========================================
-
-                let myLeader;
-
-
-                if (
-
-                    leaderRequested
-
-                ) {
-
-
-                    myLeader =
-
-                        processLeaderRequest({
-
-                            token,
-
-                            sessao,
-
-                            registro,
-
-                            room,
-
-                            requestedActive:
-                                true,
-
-                            requestedRank:
-                                leaderRank,
-
-                            alive,
-
-                            target,
-
-                            targetId,
-
-                            combatMode,
-
-                            agora
-
-                        });
-
-
-                } else {
-
-
-                    myLeader =
-
-                        processLeaderRequest({
-
-                            token,
-
-                            sessao,
-
-                            registro,
-
-                            room,
-
-                            requestedActive:
-                                false,
-
-                            requestedRank:
-                                0,
-
-                            alive,
-
-                            target,
-
-                            targetId,
-
-                            combatMode,
-
-                            agora
-
-                        });
-
-                }
-
-
-                // ==========================================
-                // HEARTBEAT DO LEADER
-                // ==========================================
-
-                updateOwnedLeaderHeartbeat(
-
-                    token,
-
-                    room,
-
-                    alive,
-
-                    target,
-
-                    targetId,
-
-                    combatMode,
-
-                    agora
-
-                );
-
-
-                // ==========================================
-                // PLAYERS DA SALA
-                // ==========================================
-
-                const playersByName =
-                    new Map();
-
-
-                for (
-
-                    const [
-
-                        outroToken,
-
-                        data
-
-                    ]
-
-                    of conectadosMap.entries()
-
-                ) {
-
-
-                    if (
-
-                        agora -
-                            data.timestamp >
-
-                            PLAYER_TIMEOUT_MS ||
-
-                        !validarSessao(
-                            outroToken
-                        )
-
-                    ) {
-
-
-                        conectadosMap.delete(
-                            outroToken
-                        );
-
-
-                        continue;
-
-                    }
-
-
-                    if (
-
-                        data.room === room
-
-                    ) {
-
-
-                        playersByName.set(
-
-                            data.name.toLowerCase(),
-
-                            {
-
-                                name:
-                                    data.name,
-
-                                voc:
-                                    data.voc || '',
-
-                                needsMana:
-                                    Boolean(
-                                        data.needsMana
-                                    ),
-
-                                target:
-                                    data.target || '',
-
-                                targetId:
-                                    Number(
-                                        data.targetId
-                                    ) || 0,
-
-                                combatMode:
-                                    parseCombatMode(
-                                        data.combatMode
-                                    ),
-
-                                alive:
-                                    Boolean(
-                                        data.alive
-                                    )
-
-                            }
-
-                        );
-
-                    }
-
-                }
-
-
-                // ==========================================
-                // ORDENA PLAYERS
-                // ==========================================
-
-                const players =
-
-                    Array
-
-                        .from(
-
-                            playersByName.values()
-
-                        )
-
-                        .sort(
-
-                            (a, b) =>
-
-                                a.name.localeCompare(
-
-                                    b.name,
-
-                                    'pt-BR',
-
-                                    {
-
-                                        sensitivity:
-                                            'base'
-
-                                    }
-
-                                )
-
-                        );
-
-
-                // ==========================================
-                // LEADERS
-                // ==========================================
-
-                const leaders =
-
-                    buildLeadersResponse(
-
-                        room,
-
-                        agora
-
-                    );
-
-
-                // ==========================================
-                // COMMANDER
-                //
-                // L1 -> L2 -> L3
-                // ==========================================
-
-                const commander =
-
-                    buildCommanderResponse(
-
-                        room,
-
-                        agora
-
-                    );
-
-
-                // ==========================================
-                // RESPOSTA
-                // ==========================================
-
-                responderJson(
-
-                    res,
-
-                    200,
-
-                    {
-
-                        auth:
-                            true,
-
-                        room,
-
-                        members:
-
-                            players.map(
-
-                                (p) =>
-                                    p.name
-
-                            ),
-
-                        players,
-
-                        leaders,
-
-                        commander,
-
-                        myLeader
-
-                    }
-
-                );
-
-
-                return;
+                msg:
+                    'Key ou personagem nao informado.'
 
             }
 
+        );
 
-            // ==========================================
-            // 404
-            // ==========================================
 
-            responderJson(
+        return;
 
-                res,
+    }
 
-                404,
+
+    if (
+        !registro ||
+        !registro.ativo
+    ) {
+
+        responderJson(
+
+            res,
+
+            401,
+
+            {
+
+                auth:
+                    false,
+
+                msg:
+                    'Key invalida ou expirada.'
+
+            }
+
+        );
+
+
+        return;
+
+    }
+
+
+    if (
+        !personagemPermitido(
+            registro,
+            name
+        )
+    ) {
+
+        responderJson(
+
+            res,
+
+            403,
+
+            {
+
+                auth:
+                    false,
+
+                msg:
+                    'Personagem nao autorizado para esta key.'
+
+            }
+
+        );
+
+
+        return;
+
+    }
+
+
+    const maxSessoes =
+
+        Math.max(
+
+            1,
+
+            Number(
+                registro.maxSessoes
+            ) || 1
+
+        );
+
+
+    prepararNovaSessao(
+        key,
+        maxSessoes
+    );
+
+
+    const agora =
+        Date.now();
+
+
+    const token =
+        gerarToken();
+
+
+    sessoes.set(
+
+        token,
+
+        {
+
+            key,
+
+            name,
+
+            dono:
+                registro.dono || '',
+
+            createdAt:
+                agora,
+
+            lastSeen:
+                agora,
+
+            expiresAt:
+
+                agora +
+
+                SESSION_TTL_MS
+
+        }
+
+    );
+
+
+    responderJson(
+
+        res,
+
+        200,
+
+        {
+
+            auth:
+                true,
+
+            msg:
+                'Licenca valida! Bem vindo.',
+
+            token,
+
+            expiresIn:
+                SESSION_TTL_MS,
+
+            leaderAllowed:
+
+                registro.permiteLeader === true
+
+        }
+
+    );
+
+
+    return;
+
+}
+
+
+// ==========================================
+// FAST COMBAT UPDATE
+//
+// SOMENTE LEADER
+//
+// Leader verifica target localmente em 50ms.
+// Somente quando muda:
+// /combat/update
+// ==========================================
+
+if (
+    urlObj.pathname ===
+    '/combat/update'
+) {
+
+    if (
+        req.method !== 'GET'
+    ) {
+
+        responderJson(
+
+            res,
+
+            405,
+
+            {
+
+                auth:
+                    false,
+
+                msg:
+                    'Metodo nao permitido.'
+
+            }
+
+        );
+
+
+        return;
+
+    }
+
+
+    const ident =
+        validarIdentidadeDeRequest(
+            urlObj
+        );
+
+
+    if (
+        ident.error
+    ) {
+
+        responderJson(
+
+            res,
+
+            ident.error[0],
+
+            ident.error[1]
+
+        );
+
+
+        return;
+
+    }
+
+
+    const registro =
+
+        chavesValidas[
+            ident.sessao.key
+        ];
+
+
+    if (
+
+        !registro ||
+
+        registro.permiteLeader !== true
+
+    ) {
+
+        responderJson(
+
+            res,
+
+            403,
+
+            {
+
+                auth:
+                    true,
+
+                ok:
+                    false,
+
+                msg:
+                    'Licenca sem acesso Leader.'
+
+            }
+
+        );
+
+
+        return;
+
+    }
+
+
+    const owned =
+        findLeaderSlotByToken(
+            ident.token
+        );
+
+
+    if (
+
+        !owned ||
+
+        owned.room !== ident.room
+
+    ) {
+
+        responderJson(
+
+            res,
+
+            409,
+
+            {
+
+                auth:
+                    true,
+
+                ok:
+                    false,
+
+                msg:
+                    'Nenhum slot de Leader ativo nesta sala.'
+
+            }
+
+        );
+
+
+        return;
+
+    }
+
+
+    const target =
+
+        normalizarTexto(
+
+            urlObj.searchParams.get(
+                'target'
+            ) || '',
+
+            50,
+
+            true
+
+        );
+
+
+    const targetId =
+
+        parseTargetId(
+
+            urlObj.searchParams.get(
+                'targetId'
+            )
+
+        );
+
+
+    const alive =
+
+        parseBoolean(
+
+            urlObj.searchParams.get(
+                'alive'
+            )
+
+        );
+
+
+    const combatMode =
+
+        parseCombatMode(
+
+            urlObj.searchParams.get(
+                'combatMode'
+            )
+
+        );
+
+
+    const agora =
+        Date.now();
+
+
+    updateOwnedLeaderCombat(
+
+        ident.token,
+
+        ident.room,
+
+        alive,
+
+        target,
+
+        targetId,
+
+        combatMode,
+
+        agora
+
+    );
+
+
+    const snapshot =
+        getCombatSnapshot(
+            ident.room,
+            agora
+        );
+
+
+    responderJson(
+
+        res,
+
+        200,
+
+        {
+
+            auth:
+                true,
+
+            ok:
+                true,
+
+            changed:
+                true,
+
+            seq:
+                snapshot.seq,
+
+            leaders:
+                snapshot.leaders,
+
+            commander:
+                snapshot.commander
+
+        }
+
+    );
+
+
+    return;
+
+}
+
+
+// ==========================================
+// FAST COMBAT STATE
+//
+// MEMBROS
+//
+// Exemplo:
+// /combat/state?seq=25
+//
+// Se ainda for 25:
+// resposta muito pequena.
+//
+// Se mudou para 26:
+// envia novo target / commander.
+// ==========================================
+
+if (
+    urlObj.pathname ===
+    '/combat/state'
+) {
+
+    if (
+        req.method !== 'GET'
+    ) {
+
+        responderJson(
+
+            res,
+
+            405,
+
+            {
+
+                auth:
+                    false,
+
+                msg:
+                    'Metodo nao permitido.'
+
+            }
+
+        );
+
+
+        return;
+
+    }
+
+
+    const ident =
+        validarIdentidadeDeRequest(
+            urlObj
+        );
+
+
+    if (
+        ident.error
+    ) {
+
+        responderJson(
+
+            res,
+
+            ident.error[0],
+
+            ident.error[1]
+
+        );
+
+
+        return;
+
+    }
+
+
+    const since =
+
+        Math.max(
+
+            0,
+
+            Number(
+
+                urlObj.searchParams.get(
+                    'seq'
+                )
+
+            ) || 0
+
+        );
+
+
+    const snapshot =
+        getCombatSnapshot(
+
+            ident.room,
+
+            Date.now()
+
+        );
+
+
+    // Nada mudou.
+
+    if (
+        since >=
+        snapshot.seq
+    ) {
+
+        responderJson(
+
+            res,
+
+            200,
+
+            {
+
+                auth:
+                    true,
+
+                changed:
+                    false,
+
+                seq:
+                    snapshot.seq
+
+            }
+
+        );
+
+
+        return;
+
+    }
+
+
+    // Combate mudou.
+
+    responderJson(
+
+        res,
+
+        200,
+
+        {
+
+            auth:
+                true,
+
+            changed:
+                true,
+
+            seq:
+                snapshot.seq,
+
+            leaders:
+                snapshot.leaders,
+
+            commander:
+                snapshot.commander
+
+        }
+
+    );
+
+
+    return;
+
+}
+
+
+// ==========================================
+// HEARTBEAT COMPLETO
+//
+// Continua rodando aproximadamente
+// a cada 1500ms.
+//
+// Nao e mais responsavel sozinho
+// pela velocidade de troca de target.
+// ==========================================
+
+if (
+    urlObj.pathname === '/sync'
+) {
+
+    if (
+        req.method !== 'GET'
+    ) {
+
+        responderJson(
+
+            res,
+
+            405,
+
+            {
+
+                auth:
+                    false,
+
+                msg:
+                    'Metodo nao permitido.'
+
+            }
+
+        );
+
+
+        return;
+
+    }
+
+
+    const ident =
+        validarIdentidadeDeRequest(
+            urlObj
+        );
+
+
+    if (
+        ident.error
+    ) {
+
+        responderJson(
+
+            res,
+
+            ident.error[0],
+
+            ident.error[1]
+
+        );
+
+
+        return;
+
+    }
+
+
+    // ==========================================
+    // DADOS DO PLAYER
+    // ==========================================
+
+    const vocRaw =
+
+        String(
+
+            urlObj.searchParams.get(
+                'voc'
+            ) || ''
+
+        ).toUpperCase();
+
+
+    const voc =
+
+        vocacaoValida(
+            vocRaw
+        )
+
+            ? vocRaw
+
+            : '';
+
+
+    const needsMana =
+
+        parseBoolean(
+
+            urlObj.searchParams.get(
+                'needsMana'
+            )
+
+        );
+
+
+    const target =
+
+        normalizarTexto(
+
+            urlObj.searchParams.get(
+                'target'
+            ) || '',
+
+            50,
+
+            true
+
+        );
+
+
+    const targetId =
+
+        parseTargetId(
+
+            urlObj.searchParams.get(
+                'targetId'
+            )
+
+        );
+
+
+    const alive =
+
+        parseBoolean(
+
+            urlObj.searchParams.get(
+                'alive'
+            )
+
+        );
+
+
+    const combatMode =
+
+        parseCombatMode(
+
+            urlObj.searchParams.get(
+                'combatMode'
+            )
+
+        );
+
+
+    const leaderRequested =
+
+        parseBoolean(
+
+            urlObj.searchParams.get(
+                'leaderActive'
+            )
+
+        );
+
+
+    const leaderRank =
+
+        parseLeaderRank(
+
+            urlObj.searchParams.get(
+                'leaderRank'
+            )
+
+        );
+
+
+    const agora =
+        Date.now();
+
+
+    const registro =
+
+        chavesValidas[
+            ident.sessao.key
+        ];
+
+
+    // ==========================================
+    // RENOVA SESSAO
+    // ==========================================
+
+    ident.sessao.lastSeen =
+        agora;
+
+
+    ident.sessao.expiresAt =
+
+        agora +
+
+        SESSION_TTL_MS;
+
+
+    // ==========================================
+    // PLAYER ONLINE
+    // ==========================================
+
+    conectadosMap.set(
+
+        ident.token,
+
+        {
+
+            name:
+                ident.sessao.name,
+
+            room:
+                ident.room,
+
+            voc,
+
+            needsMana,
+
+            target,
+
+            targetId,
+
+            combatMode,
+
+            alive,
+
+            timestamp:
+                agora
+
+        }
+
+    );
+
+
+    // ==========================================
+    // LEADER
+    // ==========================================
+
+    const myLeader =
+
+        processLeaderRequest({
+
+            token:
+                ident.token,
+
+            sessao:
+                ident.sessao,
+
+            registro,
+
+            room:
+                ident.room,
+
+            requestedActive:
+                leaderRequested,
+
+            requestedRank:
+
+                leaderRequested
+
+                    ? leaderRank
+
+                    : 0,
+
+            alive,
+
+            target,
+
+            targetId,
+
+            combatMode,
+
+            agora
+
+        });
+
+
+    // Heartbeat operacional
+    // continua separado do fast combat.
+
+    updateOwnedLeaderHeartbeat(
+
+        ident.token,
+
+        ident.room,
+
+        alive,
+
+        target,
+
+        targetId,
+
+        combatMode,
+
+        agora
+
+    );
+
+
+    // ==========================================
+    // PLAYERS DA SALA
+    // ==========================================
+
+    const playersByName =
+        new Map();
+
+
+    for (
+
+        const [
+            outroToken,
+            data
+        ]
+
+        of conectadosMap.entries()
+
+    ) {
+
+
+        if (
+
+            agora -
+                data.timestamp
+
+            > PLAYER_TIMEOUT_MS ||
+
+            !validarSessao(
+                outroToken
+            )
+
+        ) {
+
+
+            conectadosMap.delete(
+                outroToken
+            );
+
+
+            continue;
+
+        }
+
+
+        if (
+            data.room ===
+            ident.room
+        ) {
+
+
+            playersByName.set(
+
+                data.name.toLowerCase(),
 
                 {
 
-                    ok:
-                        false,
+                    name:
+                        data.name,
 
-                    msg:
-                        'Rota nao encontrada.'
+                    voc:
+                        data.voc || '',
+
+                    needsMana:
+                        Boolean(
+                            data.needsMana
+                        ),
+
+                    target:
+                        data.target || '',
+
+                    targetId:
+                        Number(
+                            data.targetId
+                        ) || 0,
+
+                    combatMode:
+                        parseCombatMode(
+                            data.combatMode
+                        ),
+
+                    alive:
+                        Boolean(
+                            data.alive
+                        )
 
                 }
 
@@ -2586,11 +2978,124 @@ const server =
 
         }
 
+    }
+
+
+    const players =
+
+        Array
+
+            .from(
+                playersByName.values()
+            )
+
+            .sort(
+
+                (a, b) =>
+
+                    a.name.localeCompare(
+
+                        b.name,
+
+                        'pt-BR',
+
+                        {
+                            sensitivity:
+                                'base'
+                        }
+
+                    )
+
+            );
+
+
+    // ==========================================
+    // COMBAT SNAPSHOT
+    // ==========================================
+
+    const snapshot =
+        getCombatSnapshot(
+            ident.room,
+            agora
+        );
+
+
+    // ==========================================
+    // RESPOSTA
+    // ==========================================
+
+    responderJson(
+
+        res,
+
+        200,
+
+        {
+
+            auth:
+                true,
+
+            room:
+                ident.room,
+
+            members:
+
+                players.map(
+                    (p) => p.name
+                ),
+
+            players,
+
+            leaders:
+                snapshot.leaders,
+
+            commander:
+                snapshot.commander,
+
+            combatSeq:
+                snapshot.seq,
+
+            myLeader
+
+        }
+
+    );
+
+
+    return;
+
+}
+
+
+// ==========================================
+// 404
+// ==========================================
+
+responderJson(
+
+    res,
+
+    404,
+
+    {
+
+        ok:
+            false,
+
+        msg:
+            'Rota nao encontrada.'
+
+    }
+
+);
+
+        }
+
     );
 
 
 // ==========================================
-// INICIA SERVIDOR
+// START
 // ==========================================
 
 server.listen(
@@ -2601,7 +3106,7 @@ server.listen(
 
         console.log(
 
-            `[Guild Server V6] Servidor HTTP rodando na porta ${PORT}`
+            `[Guild Server V7] Servidor HTTP rodando na porta ${PORT}`
 
         );
 
