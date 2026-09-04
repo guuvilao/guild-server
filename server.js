@@ -3,16 +3,26 @@ const crypto = require('crypto');
 
 const PORT = Number(process.env.PORT) || 3000;
 
-// ==========================================
-// GUILD SERVER V7 / CLIENT V30
-// Heartbeat completo separado do canal rapido de combate.
-// ==========================================
-
-const PLAYER_TIMEOUT_MS = 30 * 1000;
-const LEADER_ACTIVE_TIMEOUT_MS = 5 * 1000;
+const PLAYER_TIMEOUT_MS = 30_000;
+const LEADER_ACTIVE_TIMEOUT_MS = 5_000;
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
-const AUTH_WINDOW_MS = 60 * 1000;
+
+const AUTH_WINDOW_MS = 60_000;
 const AUTH_MAX_ATTEMPTS = 10;
+
+
+// ==========================================
+// GUILD SERVER V8 / CLIENT V31
+//
+// /sync
+// = heartbeat geral
+//
+// /combat/update
+// = mudanca rapida do Leader
+//
+// /combat/state
+// = leitura rapida dos membros
+// ==========================================
 
 
 // ==========================================
@@ -52,22 +62,14 @@ const chavesValidas = {
 // MEMORIA
 // ==========================================
 
-// token -> sessao
 const sessoes = new Map();
 
-// token -> player conectado pelo heartbeat
 const conectadosMap = new Map();
 
-// room -> Map(rank -> Leader)
 const leaderRooms = new Map();
 
-// room -> {
-//     seq,
-//     fingerprint
-// }
 const roomCombatVersions = new Map();
 
-// IP -> anti spam
 const authRateMap = new Map();
 
 
@@ -77,26 +79,29 @@ const authRateMap = new Map();
 
 function responderJson(
     res,
-    statusCode,
-    payload
+    status,
+    body
 ) {
 
     res.writeHead(
-        statusCode,
+        status,
         {
+
             'Content-Type':
                 'application/json; charset=utf-8',
 
             'Cache-Control':
                 'no-store, no-cache, must-revalidate',
 
-            'Pragma':
+            Pragma:
                 'no-cache'
+
         }
     );
 
+
     res.end(
-        JSON.stringify(payload)
+        JSON.stringify(body)
     );
 
 }
@@ -109,26 +114,27 @@ function responderJson(
 function getClientIp(req) {
 
     const forwarded =
-        req.headers['x-forwarded-for'];
+        req.headers[
+            'x-forwarded-for'
+        ];
 
-    if (forwarded) {
 
-        return String(forwarded)
+    return forwarded
+
+        ? String(forwarded)
             .split(',')[0]
-            .trim();
+            .trim()
 
-    }
-
-    return (
-        req.socket.remoteAddress ||
-        'unknown'
-    );
+        : (
+            req.socket.remoteAddress ||
+            'unknown'
+        );
 
 }
 
 
 // ==========================================
-// ANTI SPAM AUTH
+// RATE LIMIT AUTH
 // ==========================================
 
 function authPermitido(req) {
@@ -136,17 +142,23 @@ function authPermitido(req) {
     const ip =
         getClientIp(req);
 
+
     const agora =
         Date.now();
 
-    const atual =
+
+    const state =
         authRateMap.get(ip);
 
 
     if (
-        !atual ||
-        agora - atual.startedAt >=
+
+        !state ||
+
+        agora -
+            state.startedAt >=
             AUTH_WINDOW_MS
+
     ) {
 
         authRateMap.set(
@@ -157,13 +169,14 @@ function authPermitido(req) {
             }
         );
 
+
         return true;
 
     }
 
 
     if (
-        atual.count >=
+        state.count >=
         AUTH_MAX_ATTEMPTS
     ) {
 
@@ -172,7 +185,8 @@ function authPermitido(req) {
     }
 
 
-    atual.count += 1;
+    state.count += 1;
+
 
     return true;
 
@@ -185,12 +199,12 @@ function authPermitido(req) {
 
 function normalizarTexto(
     value,
-    max = 50,
-    allowEmpty = false
+    max = 50
 ) {
 
     if (
-        typeof value !== 'string'
+        typeof value !==
+        'string'
     ) {
 
         return '';
@@ -198,21 +212,12 @@ function normalizarTexto(
     }
 
 
-    const texto =
+    const text =
         value.trim();
 
 
-    if (!texto) {
-
-        return allowEmpty
-            ? ''
-            : '';
-
-    }
-
-
     if (
-        texto.length > max
+        text.length > max
     ) {
 
         return '';
@@ -221,7 +226,9 @@ function normalizarTexto(
 
 
     if (
-        /[\x00-\x1F\x7F]/.test(texto)
+        /[\x00-\x1F\x7F]/.test(
+            text
+        )
     ) {
 
         return '';
@@ -229,20 +236,18 @@ function normalizarTexto(
     }
 
 
-    return texto;
+    return text;
 
 }
 
 
 function normalizarNome(
-    value,
-    max = 50
+    value
 ) {
 
     return normalizarTexto(
         value,
-        max,
-        false
+        50
     );
 
 }
@@ -252,13 +257,18 @@ function normalizarNome(
 // SALA
 // ==========================================
 
-function salaValida(value) {
+function salaValida(
+    value
+) {
 
     return (
-        typeof value === 'string' &&
-        /^[A-Za-z0-9_-]{1,32}$/.test(
-            value
-        )
+
+        typeof value ===
+            'string' &&
+
+        /^[A-Za-z0-9_-]{1,32}$/
+            .test(value)
+
     );
 
 }
@@ -268,7 +278,9 @@ function salaValida(value) {
 // VOCACAO
 // ==========================================
 
-function vocacaoValida(value) {
+function vocacaoValida(
+    value
+) {
 
     return [
         'EK',
@@ -284,21 +296,25 @@ function vocacaoValida(value) {
 // BOOLEAN
 // ==========================================
 
-function parseBoolean(value) {
+function parseBoolean(
+    value
+) {
 
-    const raw =
+    return [
+
+        '1',
+        'true',
+        'yes',
+        'on'
+
+    ].includes(
+
         String(
             value || ''
         )
         .trim()
-        .toLowerCase();
+        .toLowerCase()
 
-
-    return (
-        raw === '1' ||
-        raw === 'true' ||
-        raw === 'yes' ||
-        raw === 'on'
     );
 
 }
@@ -308,35 +324,39 @@ function parseBoolean(value) {
 // LEADER RANK
 // ==========================================
 
-function parseLeaderRank(value) {
+function parseLeaderRank(
+    value
+) {
 
-    const rank =
+    const n =
         Number(value);
 
 
-    if (
-        Number.isInteger(rank) &&
-        rank >= 1 &&
-        rank <= 3
-    ) {
+    return (
 
-        return rank;
+        Number.isInteger(n) &&
 
-    }
+        n >= 1 &&
 
+        n <= 3
 
-    return 0;
+    )
+        ? n
+        : 0;
 
 }
 
 
 // ==========================================
-// PVP / PVE / OFF
+// COMBAT MODE
 // ==========================================
 
-function parseCombatMode(value) {
+function parseCombatMode(
+    value
+) {
 
     const mode =
+
         String(
             value || 'OFF'
         )
@@ -344,17 +364,15 @@ function parseCombatMode(value) {
         .toUpperCase();
 
 
-    if (
+    return (
+
         mode === 'PVP' ||
+
         mode === 'PVE'
-    ) {
 
-        return mode;
-
-    }
-
-
-    return 'OFF';
+    )
+        ? mode
+        : 'OFF';
 
 }
 
@@ -363,7 +381,9 @@ function parseCombatMode(value) {
 // TARGET ID
 // ==========================================
 
-function parseTargetId(value) {
+function parseTargetId(
+    value
+) {
 
     const id =
         Number(
@@ -371,23 +391,21 @@ function parseTargetId(value) {
         );
 
 
-    if (
+    return (
+
         Number.isInteger(id) &&
+
         id > 0
-    ) {
 
-        return id;
-
-    }
-
-
-    return 0;
+    )
+        ? id
+        : 0;
 
 }
 
 
 // ==========================================
-// PERSONAGEM DA KEY
+// PERSONAGEM
 // ==========================================
 
 function personagemPermitido(
@@ -396,10 +414,14 @@ function personagemPermitido(
 ) {
 
     if (
+
         !Array.isArray(
             registro.personagens
         ) ||
-        registro.personagens.length === 0
+
+        registro.personagens.length ===
+            0
+
     ) {
 
         return true;
@@ -407,18 +429,20 @@ function personagemPermitido(
     }
 
 
-    const alvo =
+    const wanted =
         nome.toLowerCase();
 
 
     return registro.personagens.some(
-        (p) =>
+
+        p =>
 
             String(p)
                 .trim()
                 .toLowerCase()
 
-            === alvo
+            === wanted
+
     );
 
 }
@@ -447,7 +471,9 @@ function getLeaderMap(
 ) {
 
     let map =
-        leaderRooms.get(room);
+        leaderRooms.get(
+            room
+        );
 
 
     if (
@@ -473,19 +499,21 @@ function getLeaderMap(
 
 
 // ==========================================
-// PROCURA LEADER PELO TOKEN
+// PROCURA SLOT
 // ==========================================
 
-function findLeaderSlotByToken(token) {
+function findLeaderSlotByToken(
+    token
+) {
 
     for (
         const [room, map]
-        of leaderRooms.entries()
+        of leaderRooms
     ) {
 
         for (
             const [rank, slot]
-            of map.entries()
+            of map
         ) {
 
             if (
@@ -511,10 +539,12 @@ function findLeaderSlotByToken(token) {
 
 
 // ==========================================
-// SEQUENCIA DE COMBATE
+// SEQUENCIA DA SALA
 // ==========================================
 
-function getRoomVersion(room) {
+function getRoomVersion(
+    room
+) {
 
     let state =
         roomCombatVersions.get(
@@ -525,8 +555,13 @@ function getRoomVersion(room) {
     if (!state) {
 
         state = {
-            seq: 0,
-            fingerprint: ''
+
+            seq:
+                0,
+
+            fingerprint:
+                ''
+
         };
 
 
@@ -544,10 +579,10 @@ function getRoomVersion(room) {
 
 
 // ==========================================
-// MONTA L1 / L2 / L3
+// LEADERS
 // ==========================================
 
-function buildLeadersRaw(
+function buildLeaders(
     room,
     agora = Date.now()
 ) {
@@ -559,7 +594,7 @@ function buildLeadersRaw(
         );
 
 
-    const result = [];
+    const leaders = [];
 
 
     for (
@@ -569,14 +604,17 @@ function buildLeadersRaw(
     ) {
 
         const slot =
+
             map
+
                 ? map.get(rank)
+
                 : null;
 
 
         if (!slot) {
 
-            result.push({
+            leaders.push({
 
                 rank,
 
@@ -617,7 +655,8 @@ function buildLeadersRaw(
             agora -
                 slot.lastHeartbeat
 
-            <= LEADER_ACTIVE_TIMEOUT_MS;
+            <=
+            LEADER_ACTIVE_TIMEOUT_MS;
 
 
         const alive =
@@ -626,7 +665,7 @@ function buildLeadersRaw(
             );
 
 
-        result.push({
+        leaders.push({
 
             rank,
 
@@ -641,7 +680,9 @@ function buildLeadersRaw(
             online,
 
             operational:
+
                 online &&
+
                 alive,
 
             target:
@@ -662,68 +703,70 @@ function buildLeadersRaw(
     }
 
 
-    return result;
+    return leaders;
 
 }
 
 
 // ==========================================
 // COMMANDER
-// L1 -> L2 -> L3
 // ==========================================
 
-function buildCommanderFromLeaders(
+function buildCommander(
     leaders
 ) {
 
-    for (
-        const leader
-        of leaders
-    ) {
+    const leader =
 
-        if (
-            leader.occupied &&
-            leader.operational
-        ) {
+        leaders.find(
 
-            return {
+            x =>
 
-                rank:
-                    leader.rank,
+                x.occupied &&
 
-                name:
-                    leader.name,
+                x.operational
 
-                operational:
-                    true,
+        );
 
-                combatMode:
-                    parseCombatMode(
-                        leader.combatMode
-                    ),
 
-                target:
-                    leader.target || '',
+    if (!leader) {
 
-                targetId:
-                    Number(
-                        leader.targetId
-                    ) || 0
-
-            };
-
-        }
+        return null;
 
     }
 
 
-    return null;
+    return {
+
+        rank:
+            leader.rank,
+
+        name:
+            leader.name,
+
+        operational:
+            true,
+
+        combatMode:
+            parseCombatMode(
+                leader.combatMode
+            ),
+
+        target:
+            leader.target || '',
+
+        targetId:
+            Number(
+                leader.targetId
+            ) || 0
+
+    };
 
 }
 
 
 // ==========================================
-// ATUALIZA TARGET SEQ
+// COMBAT SEQ
 // ==========================================
 
 function refreshCombatVersion(
@@ -732,27 +775,33 @@ function refreshCombatVersion(
 ) {
 
     const leaders =
-        buildLeadersRaw(
+        buildLeaders(
             room,
             agora
         );
 
 
     const commander =
-        buildCommanderFromLeaders(
+        buildCommander(
             leaders
         );
 
 
     const fingerprint =
+
         JSON.stringify({
+
             leaders,
+
             commander
+
         });
 
 
     const state =
-        getRoomVersion(room);
+        getRoomVersion(
+            room
+        );
 
 
     if (
@@ -783,7 +832,7 @@ function refreshCombatVersion(
 
 
 // ==========================================
-// REMOVE LEADER
+// LIBERA LEADER
 // ==========================================
 
 function releaseLeaderToken(
@@ -798,7 +847,7 @@ function releaseLeaderToken(
 
     for (
         const [room, map]
-        of leaderRooms.entries()
+        of leaderRooms
     ) {
 
         for (
@@ -810,18 +859,27 @@ function releaseLeaderToken(
 
             if (
 
-                slot.token === token &&
+                slot.token ===
+                    token &&
 
                 !(
-                    room === exceptRoom &&
-                    rank === exceptRank
+                    room ===
+                        exceptRoom &&
+
+                    rank ===
+                        exceptRank
                 )
 
             ) {
 
-                map.delete(rank);
+                map.delete(
+                    rank
+                );
 
-                touched.add(room);
+
+                touched.add(
+                    room
+                );
 
             }
 
@@ -864,15 +922,19 @@ function releaseLeaderToken(
 // APAGA SESSAO
 // ==========================================
 
-function apagarSessao(token) {
+function apagarSessao(
+    token
+) {
 
     sessoes.delete(
         token
     );
 
+
     conectadosMap.delete(
         token
     );
+
 
     releaseLeaderToken(
         token
@@ -885,11 +947,17 @@ function apagarSessao(token) {
 // VALIDA SESSAO
 // ==========================================
 
-function validarSessao(token) {
+function validarSessao(
+    token
+) {
 
     if (
+
         !token ||
-        typeof token !== 'string'
+
+        typeof token !==
+            'string'
+
     ) {
 
         return null;
@@ -898,7 +966,9 @@ function validarSessao(token) {
 
 
     const sessao =
-        sessoes.get(token);
+        sessoes.get(
+            token
+        );
 
 
     if (!sessao) {
@@ -912,34 +982,28 @@ function validarSessao(token) {
         Date.now();
 
 
-    if (
-        agora >=
-        sessao.expiresAt
-    ) {
-
-        apagarSessao(
-            token
-        );
-
-        return null;
-
-    }
-
-
     const registro =
+
         chavesValidas[
             sessao.key
         ];
 
 
     if (
+
+        agora >=
+            sessao.expiresAt ||
+
         !registro ||
+
         !registro.ativo
+
     ) {
 
         apagarSessao(
             token
         );
+
 
         return null;
 
@@ -960,59 +1024,62 @@ function prepararNovaSessao(
     maxSessoes
 ) {
 
-    const existentes = [];
+    const existentes =
+        [];
 
 
     for (
         const [token, sessao]
-        of sessoes.entries()
+        of sessoes
     ) {
 
         if (
-            sessao.key !== key
+
+            sessao.key === key &&
+
+            validarSessao(
+                token
+            )
+
         ) {
 
-            continue;
+            existentes.push({
+
+                token,
+
+                sessao
+
+            });
 
         }
-
-
-        if (
-            !validarSessao(token)
-        ) {
-
-            continue;
-
-        }
-
-
-        existentes.push({
-            token,
-            sessao
-        });
 
     }
 
 
     existentes.sort(
+
         (a, b) =>
 
             a.sessao.createdAt -
+
             b.sessao.createdAt
+
     );
 
 
     while (
+
         existentes.length >=
         maxSessoes
+
     ) {
 
-        const antiga =
-            existentes.shift();
-
-
         apagarSessao(
-            antiga.token
+
+            existentes
+                .shift()
+                .token
+
         );
 
     }
@@ -1034,7 +1101,7 @@ function cleanupLeaderRooms(
 
     for (
         const [room, map]
-        of leaderRooms.entries()
+        of leaderRooms
     ) {
 
         for (
@@ -1044,28 +1111,29 @@ function cleanupLeaderRooms(
             )
         ) {
 
-            const sessao =
-                validarSessao(
-                    slot.token
-                );
-
-
             const expired =
 
                 agora -
                     slot.lastHeartbeat
 
-                > PLAYER_TIMEOUT_MS;
+                >
+                PLAYER_TIMEOUT_MS;
 
 
             if (
-                !sessao ||
+
+                !validarSessao(
+                    slot.token
+                ) ||
+
                 expired
+
             ) {
 
                 map.delete(
                     rank
                 );
+
 
                 touched.add(
                     room
@@ -1105,7 +1173,7 @@ function cleanupLeaderRooms(
 
 
 // ==========================================
-// SNAPSHOT RAPIDO
+// SNAPSHOT
 // ==========================================
 
 function getCombatSnapshot(
@@ -1127,7 +1195,7 @@ function getCombatSnapshot(
 
 
 // ==========================================
-// PEDIDO DE LEADER
+// PROCESSA LEADER
 // ==========================================
 
 function processLeaderRequest({
@@ -1157,14 +1225,11 @@ function processLeaderRequest({
 }) {
 
     const previous =
+
         findLeaderSlotByToken(
             token
         );
 
-
-    // ==========================================
-    // LEADER OFF
-    // ==========================================
 
     if (
         !requestedActive
@@ -1194,13 +1259,13 @@ function processLeaderRequest({
     }
 
 
-    // ==========================================
-    // KEY SEM LEADER
-    // ==========================================
-
     if (
+
         !registro ||
-        registro.permiteLeader !== true
+
+        registro.permiteLeader !==
+            true
+
     ) {
 
         releaseLeaderToken(
@@ -1227,13 +1292,12 @@ function processLeaderRequest({
     }
 
 
-    // ==========================================
-    // RANK
-    // ==========================================
-
     if (
+
         requestedRank < 1 ||
+
         requestedRank > 3
+
     ) {
 
         return {
@@ -1247,8 +1311,11 @@ function processLeaderRequest({
                 ),
 
             rank:
+
                 previous
+
                     ? previous.rank
+
                     : 0,
 
             msg:
@@ -1272,32 +1339,34 @@ function processLeaderRequest({
         );
 
 
-    // ==========================================
-    // SLOT OCUPADO
-    // ==========================================
-
     if (
+
         occupied &&
-        occupied.token !== token
+
+        occupied.token !==
+            token
+
     ) {
 
-        const occupiedSession =
+        const valid =
+
             validarSessao(
                 occupied.token
             );
 
 
-        const slotExpired =
+        const expired =
 
             agora -
                 occupied.lastHeartbeat
 
-            > PLAYER_TIMEOUT_MS;
+            >
+            PLAYER_TIMEOUT_MS;
 
 
         if (
-            occupiedSession &&
-            !slotExpired
+            valid &&
+            !expired
         ) {
 
             return {
@@ -1311,8 +1380,11 @@ function processLeaderRequest({
                     ),
 
                 rank:
+
                     previous
+
                         ? previous.rank
+
                         : 0,
 
                 msg:
@@ -1334,8 +1406,72 @@ function processLeaderRequest({
 
 
     // ==========================================
-    // RESERVA SLOT
+    // V31
+    //
+    // Se ja somos donos deste slot,
+    // /sync vira SOMENTE heartbeat.
+    //
+    // Ele NAO sobrescreve:
+    // target
+    // targetId
+    // combatMode
+    // alive
     // ==========================================
+
+    if (
+
+        occupied &&
+
+        occupied.token ===
+            token
+
+    ) {
+
+        occupied.name =
+            sessao.name;
+
+
+        occupied.lastHeartbeat =
+            agora;
+
+
+        releaseLeaderToken(
+
+            token,
+
+            room,
+
+            requestedRank
+
+        );
+
+
+        refreshCombatVersion(
+            room,
+            agora
+        );
+
+
+        return {
+
+            accepted:
+                true,
+
+            active:
+                true,
+
+            rank:
+                requestedRank,
+
+            msg:
+                `Voce e o Leader ${requestedRank}.`
+
+        };
+
+    }
+
+
+    // Novo slot
 
     map.set(
 
@@ -1352,13 +1488,7 @@ function processLeaderRequest({
                 requestedRank,
 
             claimedAt:
-
-                occupied &&
-                occupied.token === token
-
-                    ? occupied.claimedAt
-
-                    : agora,
+                agora,
 
             lastHeartbeat:
                 agora,
@@ -1386,12 +1516,14 @@ function processLeaderRequest({
     );
 
 
-    // Um jogador so pode possuir um slot.
-
     releaseLeaderToken(
+
         token,
+
         room,
+
         requestedRank
+
     );
 
 
@@ -1421,39 +1553,33 @@ function processLeaderRequest({
 
 
 // ==========================================
-// HEARTBEAT NORMAL DO LEADER
+// HEARTBEAT DO LEADER
+//
+// NAO TOCA NO COMBATE
 // ==========================================
 
 function updateOwnedLeaderHeartbeat(
-
     token,
-
     room,
-
-    alive,
-
-    target,
-
-    targetId,
-
-    combatMode,
-
     agora
-
 ) {
 
     const owned =
+
         findLeaderSlotByToken(
             token
         );
 
 
     if (
+
         !owned ||
+
         owned.room !== room
+
     ) {
 
-        return;
+        return false;
 
     }
 
@@ -1462,44 +1588,26 @@ function updateOwnedLeaderHeartbeat(
         agora;
 
 
-    owned.slot.alive =
-        Boolean(
-            alive
-        );
-
-
-    owned.slot.target =
-        target || '';
-
-
-    owned.slot.targetId =
-        parseTargetId(
-            targetId
-        );
-
-
-    owned.slot.combatMode =
-        parseCombatMode(
-            combatMode
-        );
-
-
     refreshCombatVersion(
         room,
         agora
     );
 
+
+    return true;
+
 }
 
 
 // ==========================================
-// FAST COMBAT UPDATE
+// FAST COMBAT
 //
-// MUITO IMPORTANTE:
+// UNICO CAMINHO QUE ALTERA:
 //
-// Esta funcao NAO atualiza lastHeartbeat.
-// Portanto o fast sync de combate NAO substitui
-// o heartbeat completo de 1500ms.
+// target
+// targetId
+// combatMode
+// alive
 // ==========================================
 
 function updateOwnedLeaderCombat(
@@ -1521,14 +1629,18 @@ function updateOwnedLeaderCombat(
 ) {
 
     const owned =
+
         findLeaderSlotByToken(
             token
         );
 
 
     if (
+
         !owned ||
+
         owned.room !== room
+
     ) {
 
         return false;
@@ -1558,6 +1670,10 @@ function updateOwnedLeaderCombat(
         );
 
 
+    owned.slot.lastCombatAt =
+        agora;
+
+
     refreshCombatVersion(
         room,
         agora
@@ -1570,7 +1686,7 @@ function updateOwnedLeaderCombat(
 
 
 // ==========================================
-// LIMPEZA
+// LIMPEZA GERAL
 // ==========================================
 
 function limparExpirados() {
@@ -1578,8 +1694,6 @@ function limparExpirados() {
     const agora =
         Date.now();
 
-
-    // Sessoes
 
     for (
         const token
@@ -1595,11 +1709,9 @@ function limparExpirados() {
     }
 
 
-    // Players
-
     for (
         const [token, data]
-        of conectadosMap.entries()
+        of conectadosMap
     ) {
 
         if (
@@ -1607,7 +1719,8 @@ function limparExpirados() {
             agora -
                 data.timestamp
 
-            > PLAYER_TIMEOUT_MS ||
+            >
+            PLAYER_TIMEOUT_MS ||
 
             !validarSessao(
                 token
@@ -1624,26 +1737,23 @@ function limparExpirados() {
     }
 
 
-    // Leaders
-
     cleanupLeaderRooms(
         agora
     );
 
 
-    // Anti spam
-
     for (
-        const [ip, data]
-        of authRateMap.entries()
+        const [ip, state]
+        of authRateMap
     ) {
 
         if (
 
             agora -
-                data.startedAt
+                state.startedAt
 
-            > AUTH_WINDOW_MS * 2
+            >
+            AUTH_WINDOW_MS * 2
 
         ) {
 
@@ -1660,19 +1770,20 @@ function limparExpirados() {
 
 setInterval(
     limparExpirados,
-    10 * 1000
+    10_000
 ).unref();
 
 
 // ==========================================
-// VALIDA TOKEN + NOME + SALA
+// IDENTIDADE
 // ==========================================
 
-function validarIdentidadeDeRequest(
+function validarIdentidade(
     urlObj
 ) {
 
     const token =
+
         urlObj.searchParams.get(
             'token'
         ) || '';
@@ -1692,6 +1803,7 @@ function validarIdentidadeDeRequest(
 
 
     const name =
+
         normalizarNome(
 
             urlObj.searchParams.get(
@@ -1702,6 +1814,7 @@ function validarIdentidadeDeRequest(
 
 
     const sessao =
+
         validarSessao(
             token
         );
@@ -1712,12 +1825,19 @@ function validarIdentidadeDeRequest(
         return {
 
             error: [
+
                 401,
+
                 {
-                    auth: false,
+
+                    auth:
+                        false,
+
                     msg:
                         'Sessao invalida ou expirada.'
+
                 }
+
             ]
 
         };
@@ -1737,12 +1857,19 @@ function validarIdentidadeDeRequest(
         return {
 
             error: [
+
                 403,
+
                 {
-                    auth: false,
+
+                    auth:
+                        false,
+
                     msg:
                         'Personagem nao corresponde a sessao.'
+
                 }
+
             ]
 
         };
@@ -1757,12 +1884,19 @@ function validarIdentidadeDeRequest(
         return {
 
             error: [
+
                 400,
+
                 {
-                    auth: false,
+
+                    auth:
+                        false,
+
                     msg:
                         'Canal invalido.'
+
                 }
+
             ]
 
         };
@@ -1771,20 +1905,26 @@ function validarIdentidadeDeRequest(
 
 
     return {
+
         token,
+
         room,
+
         name,
+
         sessao
+
     };
 
 }
 
 
 // ==========================================
-// HTTP SERVER
+// HTTP
 // ==========================================
 
 const server =
+
     http.createServer(
 
         (req, res) => {
@@ -1815,7 +1955,7 @@ const server =
             } catch {
 
 
-                responderJson(
+                return responderJson(
 
                     res,
 
@@ -1833,1261 +1973,1154 @@ const server =
 
                 );
 
+            }
 
-                return;
+
+            // ==========================================
+            // HEALTH
+            // ==========================================
+
+            if (
+
+                urlObj.pathname === '/' ||
+
+                urlObj.pathname === '/health'
+
+            ) {
+
+                cleanupLeaderRooms();
+
+
+                return responderJson(
+
+                    res,
+
+                    200,
+
+                    {
+
+                        ok:
+                            true,
+
+                        service:
+                            'guild-server-v8',
+
+                        online:
+                            conectadosMap.size,
+
+                        sessions:
+                            sessoes.size,
+
+                        leaderRooms:
+                            leaderRooms.size
+
+                    }
+
+                );
 
             }
 
 
-// ==========================================
-// HEALTH
-// ==========================================
+            // ==========================================
+            // AUTH
+            // ==========================================
 
-if (
-    urlObj.pathname === '/' ||
-    urlObj.pathname === '/health'
-) {
+            if (
+                urlObj.pathname ===
+                '/auth'
+            ) {
 
-    cleanupLeaderRooms();
+                if (
+                    req.method !==
+                    'GET'
+                ) {
 
+                    return responderJson(
 
-    responderJson(
+                        res,
 
-        res,
+                        405,
 
-        200,
+                        {
 
-        {
+                            auth:
+                                false,
 
-            ok:
-                true,
+                            msg:
+                                'Metodo nao permitido.'
 
-            service:
-                'guild-server-v7',
+                        }
 
-            online:
-                conectadosMap.size,
+                    );
 
-            sessions:
-                sessoes.size,
-
-            leaderRooms:
-                leaderRooms.size
-
-        }
-
-    );
+                }
 
 
-    return;
+                if (
+                    !authPermitido(req)
+                ) {
 
-}
+                    return responderJson(
+
+                        res,
+
+                        429,
+
+                        {
+
+                            auth:
+                                false,
+
+                            msg:
+                                'Muitas tentativas. Aguarde um minuto.'
+
+                        }
+
+                    );
+
+                }
 
 
-// ==========================================
-// AUTH
-// ==========================================
+                const key =
 
-if (
-    urlObj.pathname === '/auth'
-) {
+                    urlObj.searchParams.get(
+                        'key'
+                    ) || '';
 
-    if (
-        req.method !== 'GET'
-    ) {
 
-        responderJson(
+                const name =
 
-            res,
+                    normalizarNome(
 
-            405,
+                        urlObj.searchParams.get(
+                            'name'
+                        )
 
-            {
+                    );
 
-                auth:
-                    false,
 
-                msg:
-                    'Metodo nao permitido.'
+                const registro =
+
+                    chavesValidas[
+                        key
+                    ];
+
+
+                if (
+                    !key ||
+                    !name
+                ) {
+
+                    return responderJson(
+
+                        res,
+
+                        400,
+
+                        {
+
+                            auth:
+                                false,
+
+                            msg:
+                                'Key ou personagem nao informado.'
+
+                        }
+
+                    );
+
+                }
+
+
+                if (
+
+                    !registro ||
+
+                    !registro.ativo
+
+                ) {
+
+                    return responderJson(
+
+                        res,
+
+                        401,
+
+                        {
+
+                            auth:
+                                false,
+
+                            msg:
+                                'Key invalida ou expirada.'
+
+                        }
+
+                    );
+
+                }
+
+
+                if (
+
+                    !personagemPermitido(
+                        registro,
+                        name
+                    )
+
+                ) {
+
+                    return responderJson(
+
+                        res,
+
+                        403,
+
+                        {
+
+                            auth:
+                                false,
+
+                            msg:
+                                'Personagem nao autorizado para esta key.'
+
+                        }
+
+                    );
+
+                }
+
+
+                prepararNovaSessao(
+
+                    key,
+
+                    Math.max(
+
+                        1,
+
+                        Number(
+                            registro.maxSessoes
+                        ) || 1
+
+                    )
+
+                );
+
+
+                const agora =
+                    Date.now();
+
+
+                const token =
+                    gerarToken();
+
+
+                sessoes.set(
+
+                    token,
+
+                    {
+
+                        key,
+
+                        name,
+
+                        dono:
+                            registro.dono || '',
+
+                        createdAt:
+                            agora,
+
+                        lastSeen:
+                            agora,
+
+                        expiresAt:
+
+                            agora +
+
+                            SESSION_TTL_MS
+
+                    }
+
+                );
+
+
+                return responderJson(
+
+                    res,
+
+                    200,
+
+                    {
+
+                        auth:
+                            true,
+
+                        msg:
+                            'Licenca valida! Bem vindo.',
+
+                        token,
+
+                        expiresIn:
+                            SESSION_TTL_MS,
+
+                        leaderAllowed:
+
+                            registro.permiteLeader ===
+                            true
+
+                    }
+
+                );
 
             }
 
-        );
+
+            // ==========================================
+            // FAST UPDATE
+            // ==========================================
+
+            if (
+                urlObj.pathname ===
+                '/combat/update'
+            ) {
+
+                if (
+                    req.method !==
+                    'GET'
+                ) {
+
+                    return responderJson(
+
+                        res,
+
+                        405,
+
+                        {
+
+                            auth:
+                                false,
+
+                            msg:
+                                'Metodo nao permitido.'
+
+                        }
+
+                    );
+
+                }
 
 
-        return;
+                const ident =
+                    validarIdentidade(
+                        urlObj
+                    );
 
-    }
+
+                if (
+                    ident.error
+                ) {
+
+                    return responderJson(
+
+                        res,
+
+                        ident.error[0],
+
+                        ident.error[1]
+
+                    );
+
+                }
 
 
-    if (
-        !authPermitido(req)
-    ) {
+                const registro =
 
-        responderJson(
+                    chavesValidas[
+                        ident.sessao.key
+                    ];
 
-            res,
 
-            429,
+                if (
 
-            {
+                    !registro ||
 
-                auth:
-                    false,
+                    registro.permiteLeader !==
+                        true
 
-                msg:
-                    'Muitas tentativas. Aguarde um minuto.'
+                ) {
+
+                    return responderJson(
+
+                        res,
+
+                        403,
+
+                        {
+
+                            auth:
+                                true,
+
+                            ok:
+                                false,
+
+                            msg:
+                                'Licenca sem acesso Leader.'
+
+                        }
+
+                    );
+
+                }
+
+
+                const owned =
+
+                    findLeaderSlotByToken(
+                        ident.token
+                    );
+
+
+                if (
+
+                    !owned ||
+
+                    owned.room !==
+                        ident.room
+
+                ) {
+
+                    return responderJson(
+
+                        res,
+
+                        409,
+
+                        {
+
+                            auth:
+                                true,
+
+                            ok:
+                                false,
+
+                            msg:
+                                'Nenhum slot de Leader ativo nesta sala.'
+
+                        }
+
+                    );
+
+                }
+
+
+                const agora =
+                    Date.now();
+
+
+                updateOwnedLeaderCombat(
+
+                    ident.token,
+
+                    ident.room,
+
+                    parseBoolean(
+
+                        urlObj.searchParams.get(
+                            'alive'
+                        )
+
+                    ),
+
+                    normalizarTexto(
+
+                        urlObj.searchParams.get(
+                            'target'
+                        ) || '',
+
+                        50
+
+                    ),
+
+                    parseTargetId(
+
+                        urlObj.searchParams.get(
+                            'targetId'
+                        )
+
+                    ),
+
+                    parseCombatMode(
+
+                        urlObj.searchParams.get(
+                            'combatMode'
+                        )
+
+                    ),
+
+                    agora
+
+                );
+
+
+                const snapshot =
+
+                    getCombatSnapshot(
+
+                        ident.room,
+
+                        agora
+
+                    );
+
+
+                return responderJson(
+
+                    res,
+
+                    200,
+
+                    {
+
+                        auth:
+                            true,
+
+                        ok:
+                            true,
+
+                        changed:
+                            true,
+
+                        seq:
+                            snapshot.seq,
+
+                        leaders:
+                            snapshot.leaders,
+
+                        commander:
+                            snapshot.commander
+
+                    }
+
+                );
 
             }
 
-        );
 
+            // ==========================================
+            // FAST STATE
+            // ==========================================
 
-        return;
+            if (
+                urlObj.pathname ===
+                '/combat/state'
+            ) {
 
-    }
+                if (
+                    req.method !==
+                    'GET'
+                ) {
 
+                    return responderJson(
 
-    const key =
-        urlObj.searchParams.get(
-            'key'
-        ) || '';
+                        res,
 
+                        405,
 
-    const name =
-        normalizarNome(
+                        {
 
-            urlObj.searchParams.get(
-                'name'
-            )
+                            auth:
+                                false,
 
-        );
+                            msg:
+                                'Metodo nao permitido.'
 
+                        }
 
-    const registro =
-        chavesValidas[
-            key
-        ];
+                    );
 
+                }
 
-    if (
-        !key ||
-        !name
-    ) {
 
-        responderJson(
+                const ident =
+                    validarIdentidade(
+                        urlObj
+                    );
 
-            res,
 
-            400,
+                if (
+                    ident.error
+                ) {
 
-            {
+                    return responderJson(
 
-                auth:
-                    false,
+                        res,
 
-                msg:
-                    'Key ou personagem nao informado.'
+                        ident.error[0],
 
-            }
+                        ident.error[1]
 
-        );
+                    );
 
+                }
 
-        return;
 
-    }
+                const since =
 
+                    Math.max(
 
-    if (
-        !registro ||
-        !registro.ativo
-    ) {
+                        0,
 
-        responderJson(
+                        Number(
 
-            res,
+                            urlObj.searchParams.get(
+                                'seq'
+                            )
 
-            401,
+                        ) || 0
 
-            {
+                    );
 
-                auth:
-                    false,
 
-                msg:
-                    'Key invalida ou expirada.'
+                const snapshot =
 
-            }
+                    getCombatSnapshot(
+                        ident.room
+                    );
 
-        );
 
-
-        return;
-
-    }
-
-
-    if (
-        !personagemPermitido(
-            registro,
-            name
-        )
-    ) {
-
-        responderJson(
-
-            res,
-
-            403,
-
-            {
-
-                auth:
-                    false,
-
-                msg:
-                    'Personagem nao autorizado para esta key.'
-
-            }
-
-        );
-
-
-        return;
-
-    }
-
-
-    const maxSessoes =
-
-        Math.max(
-
-            1,
-
-            Number(
-                registro.maxSessoes
-            ) || 1
-
-        );
-
-
-    prepararNovaSessao(
-        key,
-        maxSessoes
-    );
-
-
-    const agora =
-        Date.now();
-
-
-    const token =
-        gerarToken();
-
-
-    sessoes.set(
-
-        token,
-
-        {
-
-            key,
-
-            name,
-
-            dono:
-                registro.dono || '',
-
-            createdAt:
-                agora,
-
-            lastSeen:
-                agora,
-
-            expiresAt:
-
-                agora +
-
-                SESSION_TTL_MS
-
-        }
-
-    );
-
-
-    responderJson(
-
-        res,
-
-        200,
-
-        {
-
-            auth:
-                true,
-
-            msg:
-                'Licenca valida! Bem vindo.',
-
-            token,
-
-            expiresIn:
-                SESSION_TTL_MS,
-
-            leaderAllowed:
-
-                registro.permiteLeader === true
-
-        }
-
-    );
-
-
-    return;
-
-}
-
-
-// ==========================================
-// FAST COMBAT UPDATE
-//
-// SOMENTE LEADER
-//
-// Leader verifica target localmente em 50ms.
-// Somente quando muda:
-// /combat/update
-// ==========================================
-
-if (
-    urlObj.pathname ===
-    '/combat/update'
-) {
-
-    if (
-        req.method !== 'GET'
-    ) {
-
-        responderJson(
-
-            res,
-
-            405,
-
-            {
-
-                auth:
-                    false,
-
-                msg:
-                    'Metodo nao permitido.'
-
-            }
-
-        );
-
-
-        return;
-
-    }
-
-
-    const ident =
-        validarIdentidadeDeRequest(
-            urlObj
-        );
-
-
-    if (
-        ident.error
-    ) {
-
-        responderJson(
-
-            res,
-
-            ident.error[0],
-
-            ident.error[1]
-
-        );
-
-
-        return;
-
-    }
-
-
-    const registro =
-
-        chavesValidas[
-            ident.sessao.key
-        ];
-
-
-    if (
-
-        !registro ||
-
-        registro.permiteLeader !== true
-
-    ) {
-
-        responderJson(
-
-            res,
-
-            403,
-
-            {
-
-                auth:
-                    true,
-
-                ok:
-                    false,
-
-                msg:
-                    'Licenca sem acesso Leader.'
-
-            }
-
-        );
-
-
-        return;
-
-    }
-
-
-    const owned =
-        findLeaderSlotByToken(
-            ident.token
-        );
-
-
-    if (
-
-        !owned ||
-
-        owned.room !== ident.room
-
-    ) {
-
-        responderJson(
-
-            res,
-
-            409,
-
-            {
-
-                auth:
-                    true,
-
-                ok:
-                    false,
-
-                msg:
-                    'Nenhum slot de Leader ativo nesta sala.'
-
-            }
-
-        );
-
-
-        return;
-
-    }
-
-
-    const target =
-
-        normalizarTexto(
-
-            urlObj.searchParams.get(
-                'target'
-            ) || '',
-
-            50,
-
-            true
-
-        );
-
-
-    const targetId =
-
-        parseTargetId(
-
-            urlObj.searchParams.get(
-                'targetId'
-            )
-
-        );
-
-
-    const alive =
-
-        parseBoolean(
-
-            urlObj.searchParams.get(
-                'alive'
-            )
-
-        );
-
-
-    const combatMode =
-
-        parseCombatMode(
-
-            urlObj.searchParams.get(
-                'combatMode'
-            )
-
-        );
-
-
-    const agora =
-        Date.now();
-
-
-    updateOwnedLeaderCombat(
-
-        ident.token,
-
-        ident.room,
-
-        alive,
-
-        target,
-
-        targetId,
-
-        combatMode,
-
-        agora
-
-    );
-
-
-    const snapshot =
-        getCombatSnapshot(
-            ident.room,
-            agora
-        );
-
-
-    responderJson(
-
-        res,
-
-        200,
-
-        {
-
-            auth:
-                true,
-
-            ok:
-                true,
-
-            changed:
-                true,
-
-            seq:
-                snapshot.seq,
-
-            leaders:
-                snapshot.leaders,
-
-            commander:
-                snapshot.commander
-
-        }
-
-    );
-
-
-    return;
-
-}
-
-
-// ==========================================
-// FAST COMBAT STATE
-//
-// MEMBROS
-//
-// Exemplo:
-// /combat/state?seq=25
-//
-// Se ainda for 25:
-// resposta muito pequena.
-//
-// Se mudou para 26:
-// envia novo target / commander.
-// ==========================================
-
-if (
-    urlObj.pathname ===
-    '/combat/state'
-) {
-
-    if (
-        req.method !== 'GET'
-    ) {
-
-        responderJson(
-
-            res,
-
-            405,
-
-            {
-
-                auth:
-                    false,
-
-                msg:
-                    'Metodo nao permitido.'
-
-            }
-
-        );
-
-
-        return;
-
-    }
-
-
-    const ident =
-        validarIdentidadeDeRequest(
-            urlObj
-        );
-
-
-    if (
-        ident.error
-    ) {
-
-        responderJson(
-
-            res,
-
-            ident.error[0],
-
-            ident.error[1]
-
-        );
-
-
-        return;
-
-    }
-
-
-    const since =
-
-        Math.max(
-
-            0,
-
-            Number(
-
-                urlObj.searchParams.get(
-                    'seq'
-                )
-
-            ) || 0
-
-        );
-
-
-    const snapshot =
-        getCombatSnapshot(
-
-            ident.room,
-
-            Date.now()
-
-        );
-
-
-    // Nada mudou.
-
-    if (
-        since >=
-        snapshot.seq
-    ) {
-
-        responderJson(
-
-            res,
-
-            200,
-
-            {
-
-                auth:
-                    true,
-
-                changed:
-                    false,
-
-                seq:
+                if (
+                    since >=
                     snapshot.seq
+                ) {
+
+                    return responderJson(
+
+                        res,
+
+                        200,
+
+                        {
+
+                            auth:
+                                true,
+
+                            changed:
+                                false,
+
+                            seq:
+                                snapshot.seq
+
+                        }
+
+                    );
+
+                }
+
+
+                return responderJson(
+
+                    res,
+
+                    200,
+
+                    {
+
+                        auth:
+                            true,
+
+                        changed:
+                            true,
+
+                        seq:
+                            snapshot.seq,
+
+                        leaders:
+                            snapshot.leaders,
+
+                        commander:
+                            snapshot.commander
+
+                    }
+
+                );
 
             }
 
-        );
+
+            // ==========================================
+            // HEARTBEAT COMPLETO
+            // ==========================================
+
+            if (
+                urlObj.pathname ===
+                '/sync'
+            ) {
+
+                if (
+                    req.method !==
+                    'GET'
+                ) {
+
+                    return responderJson(
+
+                        res,
+
+                        405,
+
+                        {
+
+                            auth:
+                                false,
+
+                            msg:
+                                'Metodo nao permitido.'
+
+                        }
+
+                    );
+
+                }
 
 
-        return;
-
-    }
-
-
-    // Combate mudou.
-
-    responderJson(
-
-        res,
-
-        200,
-
-        {
-
-            auth:
-                true,
-
-            changed:
-                true,
-
-            seq:
-                snapshot.seq,
-
-            leaders:
-                snapshot.leaders,
-
-            commander:
-                snapshot.commander
-
-        }
-
-    );
+                const ident =
+                    validarIdentidade(
+                        urlObj
+                    );
 
 
-    return;
+                if (
+                    ident.error
+                ) {
 
-}
+                    return responderJson(
+
+                        res,
+
+                        ident.error[0],
+
+                        ident.error[1]
+
+                    );
+
+                }
 
 
-// ==========================================
-// HEARTBEAT COMPLETO
-//
-// Continua rodando aproximadamente
-// a cada 1500ms.
-//
-// Nao e mais responsavel sozinho
-// pela velocidade de troca de target.
-// ==========================================
+                const vocRaw =
 
-if (
-    urlObj.pathname === '/sync'
-) {
+                    String(
 
-    if (
-        req.method !== 'GET'
-    ) {
+                        urlObj.searchParams.get(
+                            'voc'
+                        ) || ''
 
-        responderJson(
+                    ).toUpperCase();
 
-            res,
 
-            405,
+                const voc =
 
-            {
+                    vocacaoValida(
+                        vocRaw
+                    )
 
-                auth:
-                    false,
+                        ? vocRaw
 
-                msg:
-                    'Metodo nao permitido.'
+                        : '';
+
+
+                const needsMana =
+
+                    parseBoolean(
+
+                        urlObj.searchParams.get(
+                            'needsMana'
+                        )
+
+                    );
+
+
+                const target =
+
+                    normalizarTexto(
+
+                        urlObj.searchParams.get(
+                            'target'
+                        ) || '',
+
+                        50
+
+                    );
+
+
+                const targetId =
+
+                    parseTargetId(
+
+                        urlObj.searchParams.get(
+                            'targetId'
+                        )
+
+                    );
+
+
+                const alive =
+
+                    parseBoolean(
+
+                        urlObj.searchParams.get(
+                            'alive'
+                        )
+
+                    );
+
+
+                const combatMode =
+
+                    parseCombatMode(
+
+                        urlObj.searchParams.get(
+                            'combatMode'
+                        )
+
+                    );
+
+
+                const leaderRequested =
+
+                    parseBoolean(
+
+                        urlObj.searchParams.get(
+                            'leaderActive'
+                        )
+
+                    );
+
+
+                const leaderRank =
+
+                    parseLeaderRank(
+
+                        urlObj.searchParams.get(
+                            'leaderRank'
+                        )
+
+                    );
+
+
+                const agora =
+                    Date.now();
+
+
+                const registro =
+
+                    chavesValidas[
+                        ident.sessao.key
+                    ];
+
+
+                // Renova token
+
+                ident.sessao.lastSeen =
+                    agora;
+
+
+                ident.sessao.expiresAt =
+
+                    agora +
+
+                    SESSION_TTL_MS;
+
+
+                // Player conectado
+
+                conectadosMap.set(
+
+                    ident.token,
+
+                    {
+
+                        name:
+                            ident.sessao.name,
+
+                        room:
+                            ident.room,
+
+                        voc,
+
+                        needsMana,
+
+                        target,
+
+                        targetId,
+
+                        combatMode,
+
+                        alive,
+
+                        timestamp:
+                            agora
+
+                    }
+
+                );
+
+
+                const myLeader =
+
+                    processLeaderRequest({
+
+                        token:
+                            ident.token,
+
+                        sessao:
+                            ident.sessao,
+
+                        registro,
+
+                        room:
+                            ident.room,
+
+                        requestedActive:
+                            leaderRequested,
+
+                        requestedRank:
+
+                            leaderRequested
+
+                                ? leaderRank
+
+                                : 0,
+
+                        alive,
+
+                        target,
+
+                        targetId,
+
+                        combatMode,
+
+                        agora
+
+                    });
+
+
+                // Heartbeat separado
+                // do estado de combate.
+
+                if (
+
+                    leaderRequested &&
+
+                    myLeader.active ===
+                        true
+
+                ) {
+
+                    updateOwnedLeaderHeartbeat(
+
+                        ident.token,
+
+                        ident.room,
+
+                        agora
+
+                    );
+
+                }
+
+
+                // ==========================================
+                // PLAYERS
+                // ==========================================
+
+                const playersByName =
+                    new Map();
+
+
+                for (
+
+                    const [
+                        outroToken,
+                        data
+                    ]
+
+                    of conectadosMap
+
+                ) {
+
+                    if (
+
+                        agora -
+                            data.timestamp
+
+                        >
+                        PLAYER_TIMEOUT_MS ||
+
+                        !validarSessao(
+                            outroToken
+                        )
+
+                    ) {
+
+                        conectadosMap.delete(
+                            outroToken
+                        );
+
+
+                        continue;
+
+                    }
+
+
+                    if (
+                        data.room ===
+                        ident.room
+                    ) {
+
+                        playersByName.set(
+
+                            data.name
+                                .toLowerCase(),
+
+                            {
+
+                                name:
+                                    data.name,
+
+                                voc:
+                                    data.voc || '',
+
+                                needsMana:
+                                    Boolean(
+                                        data.needsMana
+                                    ),
+
+                                target:
+                                    data.target || '',
+
+                                targetId:
+                                    Number(
+                                        data.targetId
+                                    ) || 0,
+
+                                combatMode:
+                                    parseCombatMode(
+                                        data.combatMode
+                                    ),
+
+                                alive:
+                                    Boolean(
+                                        data.alive
+                                    )
+
+                            }
+
+                        );
+
+                    }
+
+                }
+
+
+                const players =
+
+                    Array
+                        .from(
+                            playersByName.values()
+                        )
+                        .sort(
+
+                            (a, b) =>
+
+                                a.name.localeCompare(
+
+                                    b.name,
+
+                                    'pt-BR',
+
+                                    {
+                                        sensitivity:
+                                            'base'
+                                    }
+
+                                )
+
+                        );
+
+
+                const snapshot =
+
+                    getCombatSnapshot(
+
+                        ident.room,
+
+                        agora
+
+                    );
+
+
+                return responderJson(
+
+                    res,
+
+                    200,
+
+                    {
+
+                        auth:
+                            true,
+
+                        room:
+                            ident.room,
+
+                        members:
+
+                            players.map(
+                                p => p.name
+                            ),
+
+                        players,
+
+                        leaders:
+                            snapshot.leaders,
+
+                        commander:
+                            snapshot.commander,
+
+                        combatSeq:
+                            snapshot.seq,
+
+                        myLeader
+
+                    }
+
+                );
 
             }
 
-        );
 
+            // ==========================================
+            // 404
+            // ==========================================
 
-        return;
+            return responderJson(
 
-    }
+                res,
 
-
-    const ident =
-        validarIdentidadeDeRequest(
-            urlObj
-        );
-
-
-    if (
-        ident.error
-    ) {
-
-        responderJson(
-
-            res,
-
-            ident.error[0],
-
-            ident.error[1]
-
-        );
-
-
-        return;
-
-    }
-
-
-    // ==========================================
-    // DADOS DO PLAYER
-    // ==========================================
-
-    const vocRaw =
-
-        String(
-
-            urlObj.searchParams.get(
-                'voc'
-            ) || ''
-
-        ).toUpperCase();
-
-
-    const voc =
-
-        vocacaoValida(
-            vocRaw
-        )
-
-            ? vocRaw
-
-            : '';
-
-
-    const needsMana =
-
-        parseBoolean(
-
-            urlObj.searchParams.get(
-                'needsMana'
-            )
-
-        );
-
-
-    const target =
-
-        normalizarTexto(
-
-            urlObj.searchParams.get(
-                'target'
-            ) || '',
-
-            50,
-
-            true
-
-        );
-
-
-    const targetId =
-
-        parseTargetId(
-
-            urlObj.searchParams.get(
-                'targetId'
-            )
-
-        );
-
-
-    const alive =
-
-        parseBoolean(
-
-            urlObj.searchParams.get(
-                'alive'
-            )
-
-        );
-
-
-    const combatMode =
-
-        parseCombatMode(
-
-            urlObj.searchParams.get(
-                'combatMode'
-            )
-
-        );
-
-
-    const leaderRequested =
-
-        parseBoolean(
-
-            urlObj.searchParams.get(
-                'leaderActive'
-            )
-
-        );
-
-
-    const leaderRank =
-
-        parseLeaderRank(
-
-            urlObj.searchParams.get(
-                'leaderRank'
-            )
-
-        );
-
-
-    const agora =
-        Date.now();
-
-
-    const registro =
-
-        chavesValidas[
-            ident.sessao.key
-        ];
-
-
-    // ==========================================
-    // RENOVA SESSAO
-    // ==========================================
-
-    ident.sessao.lastSeen =
-        agora;
-
-
-    ident.sessao.expiresAt =
-
-        agora +
-
-        SESSION_TTL_MS;
-
-
-    // ==========================================
-    // PLAYER ONLINE
-    // ==========================================
-
-    conectadosMap.set(
-
-        ident.token,
-
-        {
-
-            name:
-                ident.sessao.name,
-
-            room:
-                ident.room,
-
-            voc,
-
-            needsMana,
-
-            target,
-
-            targetId,
-
-            combatMode,
-
-            alive,
-
-            timestamp:
-                agora
-
-        }
-
-    );
-
-
-    // ==========================================
-    // LEADER
-    // ==========================================
-
-    const myLeader =
-
-        processLeaderRequest({
-
-            token:
-                ident.token,
-
-            sessao:
-                ident.sessao,
-
-            registro,
-
-            room:
-                ident.room,
-
-            requestedActive:
-                leaderRequested,
-
-            requestedRank:
-
-                leaderRequested
-
-                    ? leaderRank
-
-                    : 0,
-
-            alive,
-
-            target,
-
-            targetId,
-
-            combatMode,
-
-            agora
-
-        });
-
-
-    // Heartbeat operacional
-    // continua separado do fast combat.
-
-    updateOwnedLeaderHeartbeat(
-
-        ident.token,
-
-        ident.room,
-
-        alive,
-
-        target,
-
-        targetId,
-
-        combatMode,
-
-        agora
-
-    );
-
-
-    // ==========================================
-    // PLAYERS DA SALA
-    // ==========================================
-
-    const playersByName =
-        new Map();
-
-
-    for (
-
-        const [
-            outroToken,
-            data
-        ]
-
-        of conectadosMap.entries()
-
-    ) {
-
-
-        if (
-
-            agora -
-                data.timestamp
-
-            > PLAYER_TIMEOUT_MS ||
-
-            !validarSessao(
-                outroToken
-            )
-
-        ) {
-
-
-            conectadosMap.delete(
-                outroToken
-            );
-
-
-            continue;
-
-        }
-
-
-        if (
-            data.room ===
-            ident.room
-        ) {
-
-
-            playersByName.set(
-
-                data.name.toLowerCase(),
+                404,
 
                 {
 
-                    name:
-                        data.name,
+                    ok:
+                        false,
 
-                    voc:
-                        data.voc || '',
-
-                    needsMana:
-                        Boolean(
-                            data.needsMana
-                        ),
-
-                    target:
-                        data.target || '',
-
-                    targetId:
-                        Number(
-                            data.targetId
-                        ) || 0,
-
-                    combatMode:
-                        parseCombatMode(
-                            data.combatMode
-                        ),
-
-                    alive:
-                        Boolean(
-                            data.alive
-                        )
+                    msg:
+                        'Rota nao encontrada.'
 
                 }
 
             );
-
-        }
-
-    }
-
-
-    const players =
-
-        Array
-
-            .from(
-                playersByName.values()
-            )
-
-            .sort(
-
-                (a, b) =>
-
-                    a.name.localeCompare(
-
-                        b.name,
-
-                        'pt-BR',
-
-                        {
-                            sensitivity:
-                                'base'
-                        }
-
-                    )
-
-            );
-
-
-    // ==========================================
-    // COMBAT SNAPSHOT
-    // ==========================================
-
-    const snapshot =
-        getCombatSnapshot(
-            ident.room,
-            agora
-        );
-
-
-    // ==========================================
-    // RESPOSTA
-    // ==========================================
-
-    responderJson(
-
-        res,
-
-        200,
-
-        {
-
-            auth:
-                true,
-
-            room:
-                ident.room,
-
-            members:
-
-                players.map(
-                    (p) => p.name
-                ),
-
-            players,
-
-            leaders:
-                snapshot.leaders,
-
-            commander:
-                snapshot.commander,
-
-            combatSeq:
-                snapshot.seq,
-
-            myLeader
-
-        }
-
-    );
-
-
-    return;
-
-}
-
-
-// ==========================================
-// 404
-// ==========================================
-
-responderJson(
-
-    res,
-
-    404,
-
-    {
-
-        ok:
-            false,
-
-        msg:
-            'Rota nao encontrada.'
-
-    }
-
-);
 
         }
 
@@ -3106,7 +3139,7 @@ server.listen(
 
         console.log(
 
-            `[Guild Server V7] Servidor HTTP rodando na porta ${PORT}`
+            `[Guild Server V8] Servidor HTTP rodando na porta ${PORT}`
 
         );
 
